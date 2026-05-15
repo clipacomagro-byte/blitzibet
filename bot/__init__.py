@@ -1,0 +1,1 @@
+"""Blitzibet Telegram bot package."""
