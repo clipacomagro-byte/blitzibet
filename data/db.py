@@ -13,6 +13,7 @@ async def get_pool() -> asyncpg.Pool:
             min_size=1,
             max_size=5,
             command_timeout=30,
+            statement_cache_size=0,
         )
     return _pool
 
