@@ -1,4 +1,4 @@
-"""Inline keyboard layouts. Two-column grid matching the mockup."""
+"""Inline keyboard layouts. Two-column grid."""
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -14,7 +14,7 @@ def main_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🔴 Live now", callback_data="m:live"),
-            InlineKeyboardButton("📅 Upcoming", callback_data="m:upcoming"),
+            InlineKeyboardButton("📜 History", callback_data="m:history"),
         ],
         [
             InlineKeyboardButton("📊 My stats", callback_data="m:stats"),
@@ -54,7 +54,3 @@ def back_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Back", callback_data="m:home")]]
     )
-
-
-def soon_menu() -> InlineKeyboardMarkup:
-    return back_menu()
