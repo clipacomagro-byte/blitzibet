@@ -1,8 +1,5 @@
-"""Anthropic Claude client. Wraps the messages API for signal-narrative writing.
-
-Designed to degrade gracefully: if Claude is unreachable / key missing / API
-errors, returns None so the signal still fires without AI commentary.
-"""
+"""Anthropic Claude client. Graceful degradation: if anything fails,
+returns None and the signal fires without the AI narrative."""
 import logging
 from anthropic import AsyncAnthropic, APIError
 
@@ -11,14 +8,19 @@ from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 log = logging.getLogger("blitzibet.claude")
 
 _client: AsyncAnthropic | None = None
+_warned_missing = False
 
 
 def _get_client() -> AsyncAnthropic | None:
-    global _client
+    global _client, _warned_missing
     if not ANTHROPIC_API_KEY:
+        if not _warned_missing:
+            log.warning("ANTHROPIC_API_KEY is not set — Claude narratives will be skipped")
+            _warned_missing = True
         return None
     if _client is None:
         _client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        log.info("Claude client initialized (model=%s)", CLAUDE_MODEL)
     return _client
 
 
@@ -40,18 +42,18 @@ Rules:
 - Never invent or estimate stats not in the input — if you don't have it, don't mention it
 - Bettor language but not gambling promotion; be honest about confidence
 - For "watch tier" signals, the AI READ ends with a note that this is just a heads-up, not a bet recommendation
-- Use plain text, no markdown emphasis (no asterisks for bold/italic — Telegram will format)"""
+- Use plain text, no markdown emphasis (no asterisks — Telegram will format)"""
 
 
 async def write_signal_narrative(context: dict, tier: str = "signal") -> str | None:
     client = _get_client()
     if client is None:
         return None
-    
+
     tier_note = ""
     if tier == "watch":
         tier_note = "\n\nIMPORTANT: This is a WATCH-tier alert, not a bet recommendation. End the AI READ section noting this is informational only, the engine is watching but not confident enough to recommend a bet."
-    
+
     user_prompt = f"""Match: {context.get('fixture_label', '')}
 Score: {context.get('home_goals', 0)}-{context.get('away_goals', 0)} at {context.get('minute', 0)}'
 League: {context.get('league', '')}
@@ -68,8 +70,10 @@ Head-to-head (last 5 meetings):
 {tier_note}
 
 Write the three-section response now."""
-    
+
     try:
+        log.info("Calling Claude for %s (tier=%s)",
+                 context.get('fixture_label', '?'), tier)
         msg = await client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=600,
@@ -82,5 +86,5 @@ Write the three-section response now."""
         log.warning("Claude API error: %s", e)
     except Exception as e:
         log.exception("Unexpected Claude failure: %s", e)
-    
+
     return None
