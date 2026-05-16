@@ -1,5 +1,6 @@
-"""Telegram handlers. /start, button callbacks, text rejection."""
+"""Telegram handlers. /start, button callbacks, text rejection, chat cleanup."""
 import logging
+import asyncio
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -19,57 +20,58 @@ WELCOME = (
 )
 
 
+async def _wipe_chat_for(user_id: int, chat_id: int, bot, limit: int = 50) -> None:
+    """Best-effort delete of all bot messages we've sent to this user."""
+    msg_ids = await models.pop_user_messages(user_id, limit=limit)
+    for mid in msg_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass  # too old / already gone / Telegram refused
+        # tiny pause to be polite to Telegram's rate limit
+        await asyncio.sleep(0.02)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None:
         return
     await models.upsert_user(user.id, user.username)
-    
     chat_id = update.effective_chat.id
-    
-    # Clean up: delete previous menu message (if we remember it)
-    last_menu_id = context.user_data.get("last_menu_msg_id")
-    if last_menu_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=last_menu_id)
-        except Exception:
-            pass  # message too old / already deleted / Telegram refused
-    
-    # Delete the user's /start command so it doesn't clutter
+
+    # Delete the /start command itself
     try:
         await update.message.delete()
     except Exception:
         pass
-    
-    # Send fresh welcome and remember its message_id
+
+    # Wipe everything the bot has sent this user
+    await _wipe_chat_for(user.id, chat_id, context.bot)
+
+    # Send fresh welcome menu and track it
     sent = await context.bot.send_message(
         chat_id=chat_id,
         text=WELCOME,
         reply_markup=menus.main_menu(),
         parse_mode="Markdown",
     )
-    context.user_data["last_menu_msg_id"] = sent.message_id
+    await models.track_bot_message(user.id, sent.message_id)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Any typed text that isn't a command — redirect to buttons."""
+    """Anything typed that isn't a command — redirect to buttons."""
     if update.message is None:
         return
-    # Delete the user's typed message too — keep the chat clean
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    # Delete the user's typed message
     try:
         await update.message.delete()
     except Exception:
         pass
-    
-    chat_id = update.effective_chat.id
-    # Also wipe previous menu before sending the reminder
-    last_menu_id = context.user_data.get("last_menu_msg_id")
-    if last_menu_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=last_menu_id)
-        except Exception:
-            pass
-    
+
+    # Don't wipe everything on text — just send a fresh menu inline
     sent = await context.bot.send_message(
         chat_id=chat_id,
         text="👋 *Buttons only.*\n\n"
@@ -77,7 +79,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=menus.main_menu(),
         parse_mode="Markdown",
     )
-    context.user_data["last_menu_msg_id"] = sent.message_id
+    if user is not None:
+        await models.track_bot_message(user.id, sent.message_id)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -198,10 +201,10 @@ async def _route_menu(parts: list[str], query) -> None:
                 status = _status_label(s.get("status", ""))
                 rule = (s.get("rule_name") or "").lower()
                 is_watch = "watch" in rule
-                
+
                 header_emoji = "👀" if is_watch else "🎯"
                 header_label = "WATCH" if is_watch else "SIGNAL"
-                
+
                 block = (
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"{header_emoji} *{header_label}* · {fire} {conf}/5 · _{ago}_\n"
