@@ -1,4 +1,4 @@
-"""Telegram handlers. /start, menus, pinning, test signal."""
+"""Telegram handlers. /start, menus, pinning, test signal per market."""
 import logging
 import random
 from datetime import datetime, timezone
@@ -19,9 +19,8 @@ log = logging.getLogger(__name__)
 WELCOME = (
     "\u26a1 *Welcome to Blitzibet*\n\n"
     "Tap a sport to pick the markets you want signals for. "
-    "Pin a market and we'll ping you the moment our engine spots "
-    "an opportunity live.\n\n"
-    "Tap to pin \u00b7 tap again to reset \u00b7 no typing needed."
+    "Tap a market once to turn it on, again to turn it off.\n\n"
+    "No typing needed."
 )
 
 
@@ -101,15 +100,8 @@ async def _send_resilient(bot, chat_id, text):
         return None
 
 
-def _pick_scenario(pinned):
-    matching = []
-    if pinned:
-        for s in DEMO_SCENARIOS:
-            if s["market"] in pinned:
-                matching.append(s)
-    if matching:
-        return random.choice(matching)
-    return random.choice(DEMO_SCENARIOS)
+def _scenarios_for(market_key):
+    return [s for s in DEMO_SCENARIOS if s["market"] == market_key]
 
 
 async def _fire_test(bot, user_id, chat_id, scenario, match, label):
@@ -214,7 +206,9 @@ async def _route_menu(parts, query, context):
                 if p["sport"] == "football":
                     pinned.add(p["market"])
             await query.edit_message_text(
-                "*Football - pick your markets*\n\nPin all 6 to receive every signal.",
+                "*Football markets*\n\n"
+                "\u2705 = ON   \u2b1c = OFF\n"
+                "Tap to toggle.",
                 reply_markup=menus.football_menu(pinned),
                 parse_mode="Markdown",
             )
@@ -232,7 +226,7 @@ async def _route_menu(parts, query, context):
     if action == "live":
         active = await models.get_active_fixtures(within_minutes=3)
         if not active:
-            text = "*Live signals*\n\nNo active games being watched right now."
+            text = "*Live signals*\n\nNo active games being watched."
         else:
             lines = ["*Live now*\n"]
             for fx in active:
@@ -242,7 +236,8 @@ async def _route_menu(parts, query, context):
                 away = fx.get("away_score", 0)
                 minute = fx.get("minute", 0)
                 lines.append(
-                    f"*{label}*\n   {home} - {away} \u00b7 {minute}' \u00b7 {league}"
+                    f"*{label}*\n"
+                    f"   {home} - {away}  {minute}'  {league}"
                 )
             text = "\n\n".join(lines)
         await query.edit_message_text(
@@ -257,13 +252,12 @@ async def _route_menu(parts, query, context):
         if not signals:
             text = "*History*\n\nNo signals yet."
         else:
-            blocks = ["*Recent signals*  last 10 from the engine"]
+            blocks = ["*Recent signals*  last 10"]
             for s in signals:
                 label = s.get("fixture_label") or "-"
                 league = s.get("league") or ""
                 market = (s.get("market") or "").upper()
                 minute = s.get("minute") or 0
-                bet = s.get("suggested_bet") or "-"
                 conf = s.get("confidence") or 0
                 fire = "\U0001f525" * min(conf, 5)
                 ago = _ago(s.get("fired_at"))
@@ -271,14 +265,10 @@ async def _route_menu(parts, query, context):
                 rule = (s.get("rule_name") or "").lower()
                 is_watch = "watch" in rule
                 head = "WATCH" if is_watch else "SIGNAL"
-                emoji = "\U0001f440" if is_watch else "\U0001f3af"
                 block = (
-                    f"{emoji} *{head}* {fire} {conf}/5 _{ago}_\n"
-                    f"*{label}*\n"
-                    f"{league} \u00b7 {minute}'\n"
-                    f"{market}\n"
-                    f"_{bet}_\n"
-                    f"{status}"
+                    f"*{head}* {fire} {conf}/5 _{ago}_\n"
+                    f"*{label}*  {league}\n"
+                    f"{market} {minute}'  {status}"
                 )
                 blocks.append(block)
             text = "\n\n".join(blocks)
@@ -294,7 +284,12 @@ async def _route_menu(parts, query, context):
         decided = s["won"] + s["lost"]
         wr = f"{(s['won']/decided*100):.0f}%" if decided else "-"
         await query.edit_message_text(
-            f"*Your stats*\n\nTotal: {s['total']}\nWon: {s['won']}\nLost: {s['lost']}\nPending: {s['pending']}\n\nWin rate: *{wr}*",
+            f"*Your stats*\n\n"
+            f"Total: {s['total']}\n"
+            f"Won: {s['won']}\n"
+            f"Lost: {s['lost']}\n"
+            f"Pending: {s['pending']}\n\n"
+            f"Win rate: *{wr}*",
             reply_markup=menus.back_menu(),
             parse_mode="Markdown",
         )
@@ -309,23 +304,43 @@ async def _route_menu(parts, query, context):
         return
 
     if action == "test":
+        await query.edit_message_text(
+            "*Pick a market to test*\n\n"
+            "Fires a synthetic signal with full AI analysis "
+            "for the market you choose.",
+            reply_markup=menus.test_market_menu(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if action == "testmarket":
+        if len(parts) < 3:
+            return
+        market_key = parts[2]
         user_id = query.from_user.id
         chat_id = query.message.chat_id
 
-        pins = await models.get_user_pins(user_id)
-        pinned = set()
-        for p in pins:
-            if p["sport"] == "football":
-                pinned.add(p["market"])
+        market_scenarios = _scenarios_for(market_key)
+        if not market_scenarios:
+            await query.edit_message_text(
+                f"No demo scenarios for *{market_key}* yet.\n\n"
+                f"Try Goals, Corners, or Cards.",
+                reply_markup=menus.back_menu(),
+                parse_mode="Markdown",
+            )
+            return
 
-        scenario = _pick_scenario(pinned)
+        scenario = random.choice(market_scenarios)
         match = random.choice(DEMO_MATCHES)
         label = f"{match['home_name']} v {match['away_name']}"
         market_up = scenario["market"].upper()
 
         try:
             await query.edit_message_text(
-                f"*Generating intelligence report*\n\n*{label}*\n{market_up} \u00b7 {match['league']}\n\n_Claude is analyzing... ~15 seconds_",
+                f"*Generating intelligence report*\n\n"
+                f"*{label}*\n"
+                f"{market_up}  {match['league']}\n\n"
+                f"_Claude is analyzing... ~10 seconds_",
                 parse_mode="Markdown",
             )
         except Exception:
@@ -336,9 +351,9 @@ async def _route_menu(parts, query, context):
                 context.bot, user_id, chat_id, scenario, match, label
             )
             if note:
-                msg = f"*Test sent* (with warning)\n\n{note}"
+                msg = f"*Test sent* (warning: {note})"
             else:
-                msg = "*Test signal sent.* Check the message above."
+                msg = "*Test signal sent.* See the message above."
             await query.edit_message_text(
                 msg,
                 reply_markup=menus.back_menu(),
@@ -346,8 +361,9 @@ async def _route_menu(parts, query, context):
             )
         except Exception as e:
             log.exception("Test failed")
+            err_msg = str(e)[:200]
             await query.edit_message_text(
-                f"*Test failed*\n\n{type(e).__name__}: {str(e)[:200]}",
+                f"*Test failed*\n\n{type(e).__name__}: {err_msg}",
                 reply_markup=menus.back_menu(),
                 parse_mode="Markdown",
             )
@@ -361,7 +377,7 @@ async def _route_pin(parts, query, context):
     market = parts[2]
     user_id = query.from_user.id
 
-    now_pinned = await models.toggle_pin(user_id, sport, market)
+    await models.toggle_pin(user_id, sport, market)
 
     if sport != "football":
         return
@@ -371,9 +387,11 @@ async def _route_pin(parts, query, context):
     for p in pins:
         if p["sport"] == "football":
             pinned.add(p["market"])
-    verb = "Pinned" if now_pinned else "Removed"
+
     await query.edit_message_text(
-        f"*Football - pick your markets*\n\n{verb} *{market}*",
+        "*Football markets*\n\n"
+        "\u2705 = ON   \u2b1c = OFF\n"
+        "Tap to toggle.",
         reply_markup=menus.football_menu(pinned),
         parse_mode="Markdown",
     )
