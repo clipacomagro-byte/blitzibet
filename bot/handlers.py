@@ -1,5 +1,6 @@
-"""Telegram handlers. Routes /start and button taps."""
+"""Telegram handlers. /start, button callbacks, text rejection."""
 import logging
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -28,6 +29,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Anything typed that isn't a command — politely redirect to buttons."""
+    if update.message is None:
+        return
+    await update.message.reply_text(
+        "👋 *Buttons only.*\n\n"
+        "This bot doesn't read typed messages — tap the buttons below to navigate.",
+        reply_markup=menus.main_menu(),
+        parse_mode="Markdown",
+    )
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
@@ -43,6 +56,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _route_pin(parts, query)
     else:
         log.warning("Unknown callback ns: %s", query.data)
+
+
+def _ago(when) -> str:
+    """Human-readable relative time."""
+    if when is None:
+        return ""
+    now = datetime.now(timezone.utc)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    diff = now - when
+    secs = diff.total_seconds()
+    if secs < 60:
+        return f"{int(secs)}s ago"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
+
+
+def _status_icon(status: str) -> str:
+    return {"won": "✅", "lost": "❌", "pending": "⏳", "void": "➖"}.get(status, "·")
 
 
 async def _route_menu(parts: list[str], query) -> None:
@@ -68,8 +103,7 @@ async def _route_menu(parts: list[str], query) -> None:
     elif action == "soon":
         sport = parts[2] if len(parts) > 2 else "this sport"
         await query.edit_message_text(
-            f"🚧 *{sport.title()} coming soon*\n\n"
-            "Football is live now. More sports rolling out next.",
+            f"🚧 *{sport.title()} coming soon*\n\nFootball is live now.",
             reply_markup=menus.back_menu(),
             parse_mode="Markdown",
         )
@@ -80,8 +114,7 @@ async def _route_menu(parts: list[str], query) -> None:
             text = (
                 "🔴 *Live signals*\n\n"
                 "No active games being watched right now. "
-                "Either no football is currently live, or the engine hasn't "
-                "had time to snapshot yet. Check back soon."
+                "Check back when football is playing."
             )
         else:
             lines = ["🔴 *Live now*  ·  games the engine is watching\n"]
@@ -99,13 +132,31 @@ async def _route_menu(parts: list[str], query) -> None:
             text, reply_markup=menus.back_menu(), parse_mode="Markdown"
         )
 
-    elif action == "upcoming":
+    elif action == "history":
+        signals = await models.get_recent_signals(limit=10)
+        if not signals:
+            text = (
+                "📜 *History*\n\n"
+                "No signals have fired yet. Once games go live and the engine "
+                "catches something, they'll show up here."
+            )
+        else:
+            lines = ["📜 *Recent signals*  ·  last 10 from the engine\n"]
+            for s in signals:
+                icon = _status_icon(s.get("status", ""))
+                label = s.get("fixture_label") or "—"
+                market = (s.get("market") or "").upper()
+                minute = s.get("minute") or 0
+                ago = _ago(s.get("fired_at"))
+                conf = s.get("confidence") or 0
+                fire = "🔥" * min(conf, 5)
+                lines.append(
+                    f"{icon} *{label}*\n"
+                    f"   {market} · {minute}' · {fire} · {ago}"
+                )
+            text = "\n\n".join(lines)
         await query.edit_message_text(
-            "📅 *Upcoming*\n\n"
-            "Scheduled games matching your filters will show here. "
-            "Coming in the next update.",
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
+            text, reply_markup=menus.back_menu(), parse_mode="Markdown"
         )
 
     elif action == "stats":
@@ -129,9 +180,7 @@ async def _route_menu(parts: list[str], query) -> None:
 
     elif action == "settings":
         await query.edit_message_text(
-            "⚙️ *Settings*\n\n"
-            "Plan: Free trial\n"
-            "Notifications: On\n\n"
+            "⚙️ *Settings*\n\nPlan: Free trial\nNotifications: On\n\n"
             "Subscription management coming soon.",
             reply_markup=menus.back_menu(),
             parse_mode="Markdown",
