@@ -1,125 +1,290 @@
-"""Telegram handlers. /start, menus, pinning, test signal per market."""
+"""Telegram handlers: /start, callback buttons, test signals, leagues."""
 import logging
 import random
-from datetime import datetime, timezone
 
+import httpx
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from bot import menus
-from data import models
-from engine.demo import DEMO_MATCHES, DEMO_SCENARIOS
-from engine.enrichment import build_narrative
-from engine.rules import Signal
-from engine.notifier import _format_signal
-
-log = logging.getLogger(__name__)
-
-
-WELCOME = (
-    "\u26a1 *Welcome to Blitzibet*\n\n"
-    "Tap a sport to pick the markets you want signals for. "
-    "Tap a market once to turn it on, again to turn it off.\n\n"
-    "No typing needed."
+from config import TELEGRAM_BOT_TOKEN
+from bot.menus import (
+    main_menu, football_menu, settings_menu, history_menu, test_market_menu,
+    leagues_menu,
 )
+from data import models
+from engine.notifier import _format_signal, build_stats_block
+from engine.demo import DEMO_MATCHES, DEMO_SCENARIOS
+from engine.rules import Signal
+from engine.enrichment import build_narrative
+
+log = logging.getLogger("bot.handlers")
+
+TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
-async def start(update, context):
-    user = update.effective_user
-    if user is None:
-        return
-    await models.upsert_user(user.id, user.username)
-    await update.message.reply_text(
-        WELCOME,
-        reply_markup=menus.main_menu(),
-        parse_mode="Markdown",
-    )
-
-
-async def on_text(update, context):
-    if update.message is None:
-        return
-    await update.message.reply_text(
-        "Buttons only. Tap below to navigate.",
-        reply_markup=menus.main_menu(),
-    )
-
-
-async def on_callback(update, context):
-    query = update.callback_query
-    if query is None or query.data is None:
-        return
-    await query.answer()
-
-    parts = query.data.split(":")
-    ns = parts[0]
-
-    if ns == "m":
-        await _route_menu(parts, query, context)
-    elif ns == "p":
-        await _route_pin(parts, query, context)
-
-
-def _ago(when):
-    if when is None:
-        return ""
-    now = datetime.now(timezone.utc)
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    secs = (now - when).total_seconds()
-    if secs < 60:
-        return f"{int(secs)}s ago"
-    if secs < 3600:
-        return f"{int(secs // 60)}m ago"
-    if secs < 86400:
-        return f"{int(secs // 3600)}h ago"
-    return f"{int(secs // 86400)}d ago"
-
-
-def _status(s):
-    return {
-        "won": "\u2705 WON",
-        "lost": "\u274c LOST",
-        "pending": "\u23f3 Pending",
-    }.get(s, "\u23f3 Pending")
-
-
-async def _send_resilient(bot, chat_id, text):
+async def _delete_message_safe(bot, chat_id, message_id):
     try:
-        sent = await bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="Markdown"
-        )
-        return sent.message_id
-    except Exception as e:
-        log.warning("Markdown failed: %s, retrying plain", e)
-    try:
-        sent = await bot.send_message(chat_id=chat_id, text=text)
-        return sent.message_id
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
-        log.exception("Plain send also failed")
-        return None
+        pass
 
 
-def _scenarios_for(market_key):
-    return [s for s in DEMO_SCENARIOS if s["market"] == market_key]
+async def _wipe_prior_bot_messages(bot, user_id):
+    try:
+        msg_ids = await models.pop_user_messages(user_id, limit=100)
+    except Exception:
+        log.exception("Failed to pop messages for %s", user_id)
+        return
+    for mid in msg_ids:
+        await _delete_message_safe(bot, user_id, mid)
 
 
-async def _fire_test(bot, user_id, chat_id, scenario, match, label):
-    fixture_id = 999000 + random.randint(0, 9999)
+async def _send_and_track(bot, chat_id, **kwargs):
+    msg = await bot.send_message(chat_id=chat_id, **kwargs)
+    try:
+        await models.track_bot_message(chat_id, msg.message_id)
+    except Exception:
+        pass
+    return msg
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    await _delete_message_safe(
+        context.bot, chat_id, update.message.message_id,
+    )
+    await _wipe_prior_bot_messages(context.bot, chat_id)
+
+    try:
+        await models.upsert_user(user.id, user.username or "")
+    except Exception:
+        log.exception("upsert_user failed")
+
+    text = (
+        "\u26a1\ufe0f *Welcome to Blitzibet*\n\n"
+        "Live in-play betting signals powered by AI.\n\n"
+        "Tap a sport to pin the markets you care about, "
+        "or hit *Test signal now* to see what a signal looks like."
+    )
+    await _send_and_track(
+        context.bot, chat_id,
+        text=text, parse_mode="Markdown",
+        reply_markup=main_menu(),
+    )
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await _delete_message_safe(
+        context.bot, chat_id, update.message.message_id,
+    )
+    await _send_and_track(
+        context.bot, chat_id,
+        text="Buttons only \U0001f447",
+        reply_markup=main_menu(),
+    )
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    user_id = query.from_user.id
+
+    if data == "main":
+        await query.edit_message_text(
+            "\u26a1\ufe0f *Blitzibet menu*",
+            parse_mode="Markdown",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if data == "football":
+        pins = await models.get_user_pins(user_id)
+        pinned = {p["market"] for p in pins if p["sport"] == "football"}
+        await query.edit_message_text(
+            "\u26bd *Football markets*\n\n"
+            "Tap a market to toggle alerts.",
+            parse_mode="Markdown",
+            reply_markup=football_menu(pinned),
+        )
+        return
+
+    if data in ("tennis", "basketball", "volleyball"):
+        sport_name = data.capitalize()
+        await query.edit_message_text(
+            f"*{sport_name}* coming soon \u23f3",
+            parse_mode="Markdown",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if data.startswith("toggle:"):
+        _, sport, market = data.split(":")
+        await models.upsert_user(user_id, query.from_user.username or "")
+        is_on = await models.toggle_pin(user_id, sport, market)
+        log.info(
+            "User %s toggled %s/%s = %s",
+            user_id, sport, market, is_on,
+        )
+        pins = await models.get_user_pins(user_id)
+        pinned = {p["market"] for p in pins if p["sport"] == sport}
+        await query.edit_message_text(
+            "\u26bd *Football markets*\n\n"
+            "Tap a market to toggle alerts.",
+            parse_mode="Markdown",
+            reply_markup=football_menu(pinned),
+        )
+        return
+
+    if data == "leagues":
+        await models.upsert_user(user_id, query.from_user.username or "")
+        enabled = set(await models.get_user_leagues(user_id))
+        intro = (
+            "\U0001f30d *Leagues*\n\n"
+            "Tap to toggle. Nothing selected = *all leagues*.\n"
+            "Select at least one to filter signals."
+        )
+        await query.edit_message_text(
+            intro, parse_mode="Markdown",
+            reply_markup=leagues_menu(enabled),
+        )
+        return
+
+    if data.startswith("toggleleague:"):
+        league_name = data.split(":", 1)[1]
+        await models.upsert_user(user_id, query.from_user.username or "")
+        is_on = await models.toggle_user_league(user_id, league_name)
+        log.info(
+            "User %s toggled league %s = %s",
+            user_id, league_name, is_on,
+        )
+        enabled = set(await models.get_user_leagues(user_id))
+        intro = (
+            "\U0001f30d *Leagues*\n\n"
+            "Tap to toggle. Nothing selected = *all leagues*.\n"
+            "Select at least one to filter signals."
+        )
+        await query.edit_message_text(
+            intro, parse_mode="Markdown",
+            reply_markup=leagues_menu(enabled),
+        )
+        return
+
+    if data == "livenow":
+        rows = await models.get_active_fixtures(within_minutes=3, limit=15)
+        if not rows:
+            text = (
+                "\U0001f534 *Live now*\n\n"
+                "No matches currently being tracked. Check back soon."
+            )
+        else:
+            lines = ["\U0001f534 *Live now*", ""]
+            for r in rows:
+                lines.append(
+                    f"\u26bd {r.get('fixture_label') or '?'}  "
+                    f"\u00b7 {r.get('minute') or 0}'  "
+                    f"\u00b7 {r.get('home_score') or 0}-"
+                    f"{r.get('away_score') or 0}"
+                )
+                lg = r.get("league")
+                if lg:
+                    lines.append(f"   _{lg}_")
+            text = "\n".join(lines)
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=main_menu(),
+        )
+        return
+
+    if data == "history":
+        rows = await models.get_recent_signals(limit=10)
+        if not rows:
+            text = "\U0001f4dc *History*\n\nNo signals fired yet."
+        else:
+            lines = ["\U0001f4dc *Recent signals*", ""]
+            for r in rows:
+                status = r.get("status") or "pending"
+                badge = "\u23f3"
+                if status == "won":
+                    badge = "\u2705"
+                elif status == "lost":
+                    badge = "\u274c"
+                lines.append(f"{badge} {r.get('fixture_label') or '?'}")
+                lines.append(
+                    f"   {r.get('market')} \u00b7 "
+                    f"{r.get('suggested_bet') or ''}"
+                )
+            text = "\n".join(lines)
+        await query.edit_message_text(
+            text, parse_mode="Markdown",
+            reply_markup=history_menu(),
+        )
+        return
+
+    if data == "stats":
+        s = await models.user_stats(user_id)
+        text = (
+            "\U0001f4ca *Your stats*\n\n"
+            f"Total signals received: *{s.get('total', 0)}*\n"
+            f"\u2705 Won: *{s.get('won', 0)}*\n"
+            f"\u274c Lost: *{s.get('lost', 0)}*\n"
+            f"\u23f3 Pending: *{s.get('pending', 0)}*"
+        )
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=main_menu(),
+        )
+        return
+
+    if data == "settings":
+        await query.edit_message_text(
+            "\u2699\ufe0f *Settings*",
+            parse_mode="Markdown", reply_markup=settings_menu(),
+        )
+        return
+
+    if data == "test":
+        await query.edit_message_text(
+            "\U0001f9ea *Test signal*\n\nPick a market to test:",
+            parse_mode="Markdown",
+            reply_markup=test_market_menu(),
+        )
+        return
+
+    if data.startswith("testfire:"):
+        market = data.split(":", 1)[1]
+        await _fire_test(query, market)
+        return
+
+
+async def _fire_test(query, market_key):
+    user_id = query.from_user.id
+    market_scenarios = [
+        s for s in DEMO_SCENARIOS if s["market"] == market_key
+    ]
+    if not market_scenarios:
+        available = sorted({s["market"] for s in DEMO_SCENARIOS})
+        await query.edit_message_text(
+            f"No demo scenarios for *{market_key}* yet.\n\n"
+            f"Available: {', '.join(available)}",
+            parse_mode="Markdown",
+            reply_markup=test_market_menu(),
+        )
+        return
+
+    scenario = random.choice(market_scenarios)
+    match = random.choice(DEMO_MATCHES)
+    label = f"{match['home_name']} v {match['away_name']}"
+
     fake_fixture = {
         "fixture": {
-            "id": fixture_id,
+            "id": 888000 + random.randint(0, 9999),
             "status": {"elapsed": scenario["minute"]},
         },
         "teams": {
-            "home": {
-                "id": match["home_id"],
-                "name": match["home_name"],
-            },
-            "away": {
-                "id": match["away_id"],
-                "name": match["away_name"],
-            },
+            "home": {"id": match["home_id"], "name": match["home_name"]},
+            "away": {"id": match["away_id"], "name": match["away_name"]},
         },
         "league": {"name": match["league"]},
         "goals": {
@@ -131,6 +296,7 @@ async def _fire_test(bot, user_id, chat_id, scenario, match, label):
         match["home_id"]: scenario["home_stats"],
         match["away_id"]: scenario["away_stats"],
     }
+
     fake_signal = Signal(
         rule_name=scenario["rule_name"],
         market=scenario["market"],
@@ -138,28 +304,20 @@ async def _fire_test(bot, user_id, chat_id, scenario, match, label):
         confidence=scenario["confidence"],
         criteria=scenario["criteria"],
         tier=scenario["tier"],
-    )
-
-    signal_id = await models.insert_signal(
-        sport="football",
-        market=scenario["market"],
-        fixture_id=fixture_id,
-        fixture_label=label,
-        league=match["league"],
-        minute=scenario["minute"],
-        rule_name=scenario["rule_name"],
-        criteria=scenario["criteria"],
-        suggested_bet=scenario["suggested_bet"],
-        confidence=scenario["confidence"],
+        risk=scenario.get("risk", "medium"),
     )
 
     narrative = None
     try:
         narrative = await build_narrative(
-            fake_fixture, fake_stats, [], fake_signal
+            fake_fixture, fake_stats, [], fake_signal,
         )
     except Exception:
-        log.exception("Enrichment failed")
+        log.exception("test narrative failed")
+
+    stats_block = build_stats_block(
+        fake_stats, match["home_id"], match["away_id"],
+    )
 
     text = _format_signal(
         fixture_label=label,
@@ -173,225 +331,40 @@ async def _fire_test(bot, user_id, chat_id, scenario, match, label):
         rule_name=scenario["rule_name"],
         tier=scenario["tier"],
         narrative=narrative,
+        risk=scenario.get("risk", "medium"),
+        stats_block=stats_block,
     )
 
-    note = None
-    if not narrative:
-        note = "AI block empty - ANTHROPIC_API_KEY missing on bot service"
-
-    msg_id = await _send_resilient(bot, chat_id, text)
-    if msg_id is None:
-        raise RuntimeError("Telegram refused both Markdown and plain")
-
-    return note
-
-
-async def _route_menu(parts, query, context):
-    action = parts[1] if len(parts) > 1 else "home"
-
-    if action == "home":
-        await query.edit_message_text(
-            WELCOME,
-            reply_markup=menus.main_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "sport":
-        sport = parts[2]
-        if sport == "football":
-            pins = await models.get_user_pins(query.from_user.id)
-            pinned = set()
-            for p in pins:
-                if p["sport"] == "football":
-                    pinned.add(p["market"])
-            await query.edit_message_text(
-                "*Football markets*\n\n"
-                "\u2705 = ON   \u2b1c = OFF\n"
-                "Tap to toggle.",
-                reply_markup=menus.football_menu(pinned),
-                parse_mode="Markdown",
-            )
-        return
-
-    if action == "soon":
-        sport = parts[2] if len(parts) > 2 else "this sport"
-        await query.edit_message_text(
-            f"*{sport.title()} coming soon*\n\nFootball is live now.",
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "live":
-        active = await models.get_active_fixtures(within_minutes=3)
-        if not active:
-            text = "*Live signals*\n\nNo active games being watched."
-        else:
-            lines = ["*Live now*\n"]
-            for fx in active:
-                label = fx.get("fixture_label") or "Fixture"
-                league = fx.get("league") or "-"
-                home = fx.get("home_score", 0)
-                away = fx.get("away_score", 0)
-                minute = fx.get("minute", 0)
-                lines.append(
-                    f"*{label}*\n"
-                    f"   {home} - {away}  {minute}'  {league}"
-                )
-            text = "\n\n".join(lines)
-        await query.edit_message_text(
-            text,
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "history":
-        signals = await models.get_recent_signals(limit=10)
-        if not signals:
-            text = "*History*\n\nNo signals yet."
-        else:
-            blocks = ["*Recent signals*  last 10"]
-            for s in signals:
-                label = s.get("fixture_label") or "-"
-                league = s.get("league") or ""
-                market = (s.get("market") or "").upper()
-                minute = s.get("minute") or 0
-                conf = s.get("confidence") or 0
-                fire = "\U0001f525" * min(conf, 5)
-                ago = _ago(s.get("fired_at"))
-                status = _status(s.get("status", ""))
-                rule = (s.get("rule_name") or "").lower()
-                is_watch = "watch" in rule
-                head = "WATCH" if is_watch else "SIGNAL"
-                block = (
-                    f"*{head}* {fire} {conf}/5 _{ago}_\n"
-                    f"*{label}*  {league}\n"
-                    f"{market} {minute}'  {status}"
-                )
-                blocks.append(block)
-            text = "\n\n".join(blocks)
-        await query.edit_message_text(
-            text,
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "stats":
-        s = await models.user_stats(query.from_user.id)
-        decided = s["won"] + s["lost"]
-        wr = f"{(s['won']/decided*100):.0f}%" if decided else "-"
-        await query.edit_message_text(
-            f"*Your stats*\n\n"
-            f"Total: {s['total']}\n"
-            f"Won: {s['won']}\n"
-            f"Lost: {s['lost']}\n"
-            f"Pending: {s['pending']}\n\n"
-            f"Win rate: *{wr}*",
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "settings":
-        await query.edit_message_text(
-            "*Settings*\n\nPlan: Free trial\nNotifications: On",
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "test":
-        await query.edit_message_text(
-            "*Pick a market to test*\n\n"
-            "Fires a synthetic signal with full AI analysis "
-            "for the market you choose.",
-            reply_markup=menus.test_market_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
-    if action == "testmarket":
-        if len(parts) < 3:
-            return
-        market_key = parts[2]
-        user_id = query.from_user.id
-        chat_id = query.message.chat_id
-
-        market_scenarios = _scenarios_for(market_key)
-        if not market_scenarios:
-            await query.edit_message_text(
-                f"No demo scenarios for *{market_key}* yet.\n\n"
-                f"Try Goals, Corners, or Cards.",
-                reply_markup=menus.back_menu(),
-                parse_mode="Markdown",
-            )
-            return
-
-        scenario = random.choice(market_scenarios)
-        match = random.choice(DEMO_MATCHES)
-        label = f"{match['home_name']} v {match['away_name']}"
-        market_up = scenario["market"].upper()
-
+    async with httpx.AsyncClient(timeout=10) as client:
         try:
-            await query.edit_message_text(
-                f"*Generating intelligence report*\n\n"
-                f"*{label}*\n"
-                f"{market_up}  {match['league']}\n\n"
-                f"_Claude is analyzing... ~10 seconds_",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-
-        try:
-            note = await _fire_test(
-                context.bot, user_id, chat_id, scenario, match, label
-            )
-            if note:
-                msg = f"*Test sent* (warning: {note})"
-            else:
-                msg = "*Test signal sent.* See the message above."
-            await query.edit_message_text(
-                msg,
-                reply_markup=menus.back_menu(),
-                parse_mode="Markdown",
-            )
+            r = await client.post(f"{TG_API}/sendMessage", json={
+                "chat_id": user_id,
+                "text": text,
+                "parse_mode": "Markdown",
+            })
+            response_data = r.json()
+            if not response_data.get("ok"):
+                log.warning(
+                    "Markdown failed: %s, retrying plain",
+                    response_data.get("description", ""),
+                )
+                r = await client.post(f"{TG_API}/sendMessage", json={
+                    "chat_id": user_id,
+                    "text": text,
+                })
+                response_data = r.json()
+            if response_data.get("ok"):
+                msg_id = response_data.get("result", {}).get("message_id")
+                if msg_id:
+                    try:
+                        await models.track_bot_message(user_id, msg_id)
+                    except Exception:
+                        pass
         except Exception as e:
-            log.exception("Test failed")
-            err_msg = str(e)[:200]
-            await query.edit_message_text(
-                f"*Test failed*\n\n{type(e).__name__}: {err_msg}",
-                reply_markup=menus.back_menu(),
-                parse_mode="Markdown",
-            )
-        return
-
-
-async def _route_pin(parts, query, context):
-    if len(parts) < 3:
-        return
-    sport = parts[1]
-    market = parts[2]
-    user_id = query.from_user.id
-
-    await models.toggle_pin(user_id, sport, market)
-
-    if sport != "football":
-        return
-
-    pins = await models.get_user_pins(user_id)
-    pinned = set()
-    for p in pins:
-        if p["sport"] == "football":
-            pinned.add(p["market"])
+            log.exception("Test send failed: %s", e)
 
     await query.edit_message_text(
-        "*Football markets*\n\n"
-        "\u2705 = ON   \u2b1c = OFF\n"
-        "Tap to toggle.",
-        reply_markup=menus.football_menu(pinned),
+        "\u2705 *Test signal sent* \u2014 check above.",
         parse_mode="Markdown",
+        reply_markup=test_market_menu(),
     )
