@@ -26,7 +26,8 @@ async def main():
     log = logging.getLogger("blitzibet.worker")
     log.info("Blitzibet worker starting")
 
-    await db.init_pool()
+    # Eager-init the DB pool so we fail fast if credentials are wrong
+    await db.get_pool()
 
     # Real data probe — non-fatal if it fails (demo mode doesn't need it)
     try:
@@ -43,9 +44,8 @@ async def main():
         log.info("DEMO MODE ENABLED — firing synthetic signals every %ds",
                  DEMO_INTERVAL_SECONDS)
         scheduler.add_job(fire_demo_signal, "interval",
-                          seconds=DEMO_INTERVAL_SECONDS,
-                          next_run_time=None)  # fires after first interval
-        # Also fire one immediately so demo isn't gated on the first interval
+                          seconds=DEMO_INTERVAL_SECONDS)
+        # Also fire one ~10s after boot so demo isn't gated on the first interval
         asyncio.create_task(_initial_demo_fire())
 
     scheduler.start()
@@ -58,7 +58,7 @@ async def main():
 
 
 async def _initial_demo_fire():
-    """Fire one demo signal ~10 seconds after boot for instant testing."""
+    """Fire one demo signal ~10 seconds after boot."""
     await asyncio.sleep(10)
     try:
         await fire_demo_signal()
