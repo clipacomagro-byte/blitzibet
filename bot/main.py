@@ -1,12 +1,12 @@
-"""Entry point for the Telegram bot process.
-Run with: python -m bot.main
-Railway: declared as the 'bot' process in Procfile.
-"""
+"""Telegram bot entry point. Run with: python -m bot.main"""
 import logging
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters,
+)
 
 from config import TELEGRAM_BOT_TOKEN
-from bot.handlers import start, on_callback
+from bot.handlers import start, on_callback, on_text
 
 
 logging.basicConfig(
@@ -20,6 +20,8 @@ def build_app() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
+    # Catch any typed text (that isn't a command) and redirect to buttons
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
 
 
