@@ -1,4 +1,5 @@
-"""Telegram handlers: /start, callback buttons, test signals, leagues."""
+"""Telegram handlers: /start, callback buttons, test signals, leagues.
+NO MORE message deletion - history stays in chat."""
 import logging
 import random
 
@@ -22,23 +23,6 @@ log = logging.getLogger("bot.handlers")
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
-async def _delete_message_safe(bot, chat_id, message_id):
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-
-async def _wipe_prior_bot_messages(bot, user_id):
-    try:
-        msg_ids = await models.pop_user_messages(user_id, limit=100)
-    except Exception:
-        log.exception("Failed to pop messages for %s", user_id)
-        return
-    for mid in msg_ids:
-        await _delete_message_safe(bot, user_id, mid)
-
-
 async def _send_and_track(bot, chat_id, **kwargs):
     msg = await bot.send_message(chat_id=chat_id, **kwargs)
     try:
@@ -51,11 +35,6 @@ async def _send_and_track(bot, chat_id, **kwargs):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
-
-    await _delete_message_safe(
-        context.bot, chat_id, update.message.message_id,
-    )
-    await _wipe_prior_bot_messages(context.bot, chat_id)
 
     try:
         await models.upsert_user(user.id, user.username or "")
@@ -77,9 +56,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    await _delete_message_safe(
-        context.bot, chat_id, update.message.message_id,
-    )
     await _send_and_track(
         context.bot, chat_id,
         text="Buttons only \U0001f447",
@@ -199,11 +175,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "history":
-        rows = await models.get_recent_signals(limit=10)
+        stats = await models.user_stats(user_id)
+        rows = await models.get_recent_signals(limit=15)
+
+        won = int(stats.get("won") or 0)
+        lost = int(stats.get("lost") or 0)
+        pending = int(stats.get("pending") or 0)
+
+        win_rate_str = ""
+        if won + lost > 0:
+            rate = int(round((won / (won + lost)) * 100))
+            win_rate_str = f"  \u00b7  *{rate}%* hit rate"
+
+        header = (
+            "\U0001f4dc *Your Predictions*\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"\u2705 *{won}* won  \u00b7  \u274c *{lost}* lost  "
+            f"\u00b7  \u23f3 *{pending}* pending{win_rate_str}\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        )
+
         if not rows:
-            text = "\U0001f4dc *History*\n\nNo signals fired yet."
+            text = header + "\nNo signals yet. Sit tight - they fire when patterns hit."
         else:
-            lines = ["\U0001f4dc *Recent signals*", ""]
+            lines = [header]
             for r in rows:
                 status = r.get("status") or "pending"
                 badge = "\u23f3"
@@ -211,12 +206,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     badge = "\u2705"
                 elif status == "lost":
                     badge = "\u274c"
-                lines.append(f"{badge} {r.get('fixture_label') or '?'}")
+                fx = r.get("fixture_label") or "?"
+                market = (r.get("market") or "").upper()
+                minute = r.get("minute") or 0
+                bet = r.get("suggested_bet") or ""
+                # truncate bet if too long
+                if len(bet) > 60:
+                    bet = bet[:57] + "..."
                 lines.append(
-                    f"   {r.get('market')} \u00b7 "
-                    f"{r.get('suggested_bet') or ''}"
+                    f"{badge} *{fx}* \u00b7 {minute}'\n"
+                    f"   _{market}_ \u2014 {bet}"
                 )
-            text = "\n".join(lines)
+            text = "\n\n".join(lines)
         await query.edit_message_text(
             text, parse_mode="Markdown",
             reply_markup=history_menu(),
@@ -225,12 +226,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "stats":
         s = await models.user_stats(user_id)
+        won = int(s.get("won") or 0)
+        lost = int(s.get("lost") or 0)
+        rate_line = ""
+        if won + lost > 0:
+            rate = int(round((won / (won + lost)) * 100))
+            rate_line = f"\n\U0001f3af Hit rate: *{rate}%*"
         text = (
             "\U0001f4ca *Your stats*\n\n"
             f"Total signals received: *{s.get('total', 0)}*\n"
-            f"\u2705 Won: *{s.get('won', 0)}*\n"
-            f"\u274c Lost: *{s.get('lost', 0)}*\n"
+            f"\u2705 Won: *{won}*\n"
+            f"\u274c Lost: *{lost}*\n"
             f"\u23f3 Pending: *{s.get('pending', 0)}*"
+            f"{rate_line}"
         )
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=main_menu(),
