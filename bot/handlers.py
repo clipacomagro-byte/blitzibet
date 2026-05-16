@@ -24,21 +24,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None:
         return
     await models.upsert_user(user.id, user.username)
-    await update.message.reply_text(
-        WELCOME, reply_markup=menus.main_menu(), parse_mode="Markdown"
-    )
-
-
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Anything typed that isn't a command — politely redirect to buttons."""
-    if update.message is None:
-        return
-    await update.message.reply_text(
-        "👋 *Buttons only.*\n\n"
-        "This bot doesn't read typed messages — tap the buttons below to navigate.",
+    
+    chat_id = update.effective_chat.id
+    
+    # Clean up: delete previous menu message (if we remember it)
+    last_menu_id = context.user_data.get("last_menu_msg_id")
+    if last_menu_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=last_menu_id)
+        except Exception:
+            pass  # message too old / already deleted / Telegram refused
+    
+    # Delete the user's /start command so it doesn't clutter
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    
+    # Send fresh welcome and remember its message_id
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text=WELCOME,
         reply_markup=menus.main_menu(),
         parse_mode="Markdown",
     )
+    context.user_data["last_menu_msg_id"] = sent.message_id
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Any typed text that isn't a command — redirect to buttons."""
+    if update.message is None:
+        return
+    # Delete the user's typed message too — keep the chat clean
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    
+    chat_id = update.effective_chat.id
+    # Also wipe previous menu before sending the reminder
+    last_menu_id = context.user_data.get("last_menu_msg_id")
+    if last_menu_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=last_menu_id)
+        except Exception:
+            pass
+    
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text="👋 *Buttons only.*\n\n"
+             "This bot doesn't read typed messages — tap below to navigate.",
+        reply_markup=menus.main_menu(),
+        parse_mode="Markdown",
+    )
+    context.user_data["last_menu_msg_id"] = sent.message_id
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -59,7 +98,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 def _ago(when) -> str:
-    """Human-readable relative time."""
     if when is None:
         return ""
     now = datetime.now(timezone.utc)
@@ -76,8 +114,13 @@ def _ago(when) -> str:
     return f"{int(secs // 86400)}d ago"
 
 
-def _status_icon(status: str) -> str:
-    return {"won": "✅", "lost": "❌", "pending": "⏳", "void": "➖"}.get(status, "·")
+def _status_label(status: str) -> str:
+    return {
+        "won": "✅ WON",
+        "lost": "❌ LOST",
+        "pending": "⏳ Pending",
+        "void": "➖ Void",
+    }.get(status, "⏳ Pending")
 
 
 async def _route_menu(parts: list[str], query) -> None:
@@ -95,7 +138,8 @@ async def _route_menu(parts: list[str], query) -> None:
             pinned_markets = {p["market"] for p in pins if p["sport"] == "football"}
             await query.edit_message_text(
                 "⚽ *Football — pick your markets*\n\n"
-                "📍 = pinned · tap again to remove",
+                "📍 = pinned · tap again to remove\n"
+                "_Pin all 6 to receive every signal_",
                 reply_markup=menus.football_menu(pinned_markets),
                 parse_mode="Markdown",
             )
@@ -141,20 +185,34 @@ async def _route_menu(parts: list[str], query) -> None:
                 "catches something, they'll show up here."
             )
         else:
-            lines = ["📜 *Recent signals*  ·  last 10 from the engine\n"]
+            blocks = ["📜 *Recent signals*  ·  last 10 from the engine"]
             for s in signals:
-                icon = _status_icon(s.get("status", ""))
                 label = s.get("fixture_label") or "—"
+                league = s.get("league") or ""
                 market = (s.get("market") or "").upper()
                 minute = s.get("minute") or 0
-                ago = _ago(s.get("fired_at"))
+                bet = s.get("suggested_bet") or "—"
                 conf = s.get("confidence") or 0
                 fire = "🔥" * min(conf, 5)
-                lines.append(
-                    f"{icon} *{label}*\n"
-                    f"   {market} · {minute}' · {fire} · {ago}"
+                ago = _ago(s.get("fired_at"))
+                status = _status_label(s.get("status", ""))
+                rule = (s.get("rule_name") or "").lower()
+                is_watch = "watch" in rule
+                
+                header_emoji = "👀" if is_watch else "🎯"
+                header_label = "WATCH" if is_watch else "SIGNAL"
+                
+                block = (
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{header_emoji} *{header_label}* · {fire} {conf}/5 · _{ago}_\n"
+                    f"⚽ *{label}*\n"
+                    f"📊 {league} · {minute}'\n"
+                    f"📍 {market}\n"
+                    f"💡 _{bet}_\n"
+                    f"   {status}"
                 )
-            text = "\n\n".join(lines)
+                blocks.append(block)
+            text = "\n\n".join(blocks)
         await query.edit_message_text(
             text, reply_markup=menus.back_menu(), parse_mode="Markdown"
         )
@@ -202,7 +260,8 @@ async def _route_pin(parts: list[str], query) -> None:
         await query.edit_message_text(
             f"⚽ *Football — pick your markets*\n\n"
             f"✓ {verb} *{market}*\n"
-            f"📍 = pinned · tap again to remove",
+            f"📍 = pinned · tap again to remove\n"
+            f"_Pin all 6 to receive every signal_",
             reply_markup=menus.football_menu(pinned_markets),
             parse_mode="Markdown",
         )
