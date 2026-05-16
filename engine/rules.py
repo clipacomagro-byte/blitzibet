@@ -1,9 +1,4 @@
-"""Signal rules — three risk profiles + instant moment detection.
-  - risk='safe'   -> high probability play (confidence 4-5)
-  - risk='medium' -> balanced momentum (confidence 3)
-  - risk='risky'  -> speculative, high reward (confidence 2)
-  - risk='urgent' -> instant moment (goal scored, big chance, big save)
-"""
+"""Signal rules — three risk profiles + instant moment detection."""
 from dataclasses import dataclass
 
 
@@ -37,7 +32,7 @@ def _team_stat(stats_by_team, team_id, key):
 
 
 # =============================================================
-# URGENT — instant moment detection (goal, big chance, big save)
+# URGENT — instant match-changers
 # =============================================================
 
 def goal_alert(fixture, current_stats, history):
@@ -51,67 +46,146 @@ def goal_alert(fixture, current_stats, history):
     base_home = base.get("home_score") or 0
     base_away = base.get("away_score") or 0
     if home_goals + away_goals <= base_home + base_away:
-        return None  # no new goal
+        return None
     teams = fixture.get("teams", {})
     home_name = teams.get("home", {}).get("name", "Home")
     away_name = teams.get("away", {}).get("name", "Away")
     scorer = home_name if home_goals > base_home else away_name
     return Signal(
-        rule_name="goal_alert",
-        market="goals",
+        rule_name="goal_alert", market="goals",
         suggested_bet=(
             f"GOAL: {scorer} scores at {minute}' - "
             f"{home_goals}-{away_goals}. Re-evaluate next-goal markets."
         ),
-        confidence=5,
-        tier="signal",
-        risk="urgent",
-        criteria={
-            "minute": minute,
-            "new_score": f"{home_goals}-{away_goals}",
-            "scorer_side": "home" if home_goals > base_home else "away",
-        },
+        confidence=5, tier="signal", risk="urgent",
+        criteria={"minute": minute, "new_score": f"{home_goals}-{away_goals}"},
     )
 
 
-def big_chance(fixture, current_stats, history):
-    """Keeper saves spiking - chances mounting, goal imminent."""
+def red_card_pressure(fixture, current_stats, history):
+    """Red card after 60' - 10 v 11 changes everything."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
-    if minute < 10 or minute > 85:
+    if minute < 60 or minute > 92:
         return None
-    older = [h for h in history if h.get("minute") and minute - h["minute"] >= 4]
+    older = [h for h in history if h.get("minute") and minute - h["minute"] >= 3]
     if not older:
         return None
     base = older[0]
     base_stats = base.get("stats") or {}
-    current_saves = _sum_stat(current_stats, "Goalkeeper Saves")
-    base_saves = _sum_stat(base_stats, "Goalkeeper Saves")
-    delta = current_saves - base_saves
-    if delta >= 2:
-        home_goals = fixture.get("goals", {}).get("home") or 0
-        away_goals = fixture.get("goals", {}).get("away") or 0
+    current_reds = _sum_stat(current_stats, "Red Cards")
+    base_reds = _sum_stat(base_stats, "Red Cards")
+    if current_reds <= base_reds:
+        return None
+    teams = fixture.get("teams", {})
+    home_id = teams.get("home", {}).get("id")
+    away_id = teams.get("away", {}).get("id")
+    home_name = teams.get("home", {}).get("name", "Home")
+    away_name = teams.get("away", {}).get("name", "Away")
+    home_red_now = _team_stat(current_stats, home_id, "Red Cards")
+    home_red_base = _team_stat(base_stats, home_id, "Red Cards")
+    red_side = "home" if home_red_now > home_red_base else "away"
+    advantaged = away_name if red_side == "home" else home_name
+    home_goals = fixture.get("goals", {}).get("home") or 0
+    away_goals = fixture.get("goals", {}).get("away") or 0
+    return Signal(
+        rule_name="red_card_late", market="goals",
+        suggested_bet=(
+            f"Red card at {minute}' - {advantaged} has man advantage. "
+            f"Over current goal line, {advantaged} to score next."
+        ),
+        confidence=4, tier="signal", risk="urgent",
+        criteria={
+            "minute": minute, "red_side": red_side,
+            "score": f"{home_goals}-{away_goals}",
+        },
+    )
+
+
+def rapid_goals(fixture, current_stats, history):
+    """Two goals in under 5 min - match exploding, over markets in play."""
+    minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
+    if not history or minute < 5:
+        return None
+    home_goals = fixture.get("goals", {}).get("home") or 0
+    away_goals = fixture.get("goals", {}).get("away") or 0
+    current_total = home_goals + away_goals
+    older = [h for h in history if h.get("minute") and minute - h["minute"] >= 5]
+    if not older:
+        return None
+    base = older[0]
+    base_total = (base.get("home_score") or 0) + (base.get("away_score") or 0)
+    if current_total - base_total >= 2:
         return Signal(
-            rule_name="big_chance",
-            market="goals",
-            suggested_bet="Major chances created - next goal / over current line",
-            confidence=4,
-            tier="signal",
-            risk="urgent",
-            criteria={
-                "minute": minute,
-                "saves_delta": delta,
-                "score": f"{home_goals}-{away_goals}",
-            },
+            rule_name="rapid_goals", market="goals",
+            suggested_bet=(
+                f"2 goals in last 5 min - match wide open. "
+                f"Over current line, another goal in 10."
+            ),
+            confidence=4, tier="signal", risk="urgent",
+            criteria={"minute": minute, "goals_delta": current_total - base_total},
+        )
+    return None
+
+
+def late_equalizer(fixture, current_stats, history):
+    """Equalizer scored after 75' - momentum massively swings."""
+    minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
+    if minute < 75 or minute > 92:
+        return None
+    home_goals = fixture.get("goals", {}).get("home") or 0
+    away_goals = fixture.get("goals", {}).get("away") or 0
+    if home_goals != away_goals or home_goals == 0:
+        return None
+    older = [h for h in history if h.get("minute") and minute - h["minute"] >= 3]
+    if not older:
+        return None
+    base = older[0]
+    base_h = base.get("home_score") or 0
+    base_a = base.get("away_score") or 0
+    if base_h == base_a:
+        return None
+    # was unequal, now equal -> equalizer
+    return Signal(
+        rule_name="late_equalizer", market="goals",
+        suggested_bet=(
+            f"Late equalizer at {minute}' - "
+            f"momentum swing. Next goal markets live."
+        ),
+        confidence=4, tier="signal", risk="urgent",
+        criteria={"minute": minute, "equalized_score": f"{home_goals}-{away_goals}"},
+    )
+
+
+def card_storm(fixture, current_stats, history):
+    """2+ yellow cards in under 5 min - heated match, more cards likely."""
+    minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
+    if minute < 20 or minute > 88:
+        return None
+    older = [h for h in history if h.get("minute") and minute - h["minute"] >= 5]
+    if not older:
+        return None
+    base = older[0]
+    base_stats = base.get("stats") or {}
+    current_yellows = _sum_stat(current_stats, "Yellow Cards")
+    base_yellows = _sum_stat(base_stats, "Yellow Cards")
+    if current_yellows - base_yellows >= 2:
+        return Signal(
+            rule_name="card_storm", market="cards",
+            suggested_bet=(
+                f"{current_yellows - base_yellows} yellows in 5 min - "
+                f"over 4.5 cards in play, more incoming."
+            ),
+            confidence=3, tier="signal", risk="medium",
+            criteria={"minute": minute, "yellow_delta": current_yellows - base_yellows},
         )
     return None
 
 
 # =============================================================
-# SAFE — high probability plays
+# SAFE
 # =============================================================
 
 def dominance_btts(fixture, current_stats, history):
-    """Both teams creating, no BTTS yet -> BTTS yes by FT."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 50 or minute > 80:
         return None
@@ -135,7 +209,6 @@ def dominance_btts(fixture, current_stats, history):
 
 
 def over_volume(fixture, current_stats, history):
-    """High shot volume -> over X.5 total shots by FT."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 55 or minute > 75:
         return None
@@ -152,11 +225,10 @@ def over_volume(fixture, current_stats, history):
 
 
 # =============================================================
-# MEDIUM / RISKY — momentum-based
+# MEDIUM / RISKY
 # =============================================================
 
 def shots_burst(fixture, current_stats, history):
-    """Shots-on-goal surge. 3+ = SAFE, 2 = MEDIUM."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 25 or minute > 85:
         return None
@@ -190,7 +262,6 @@ def shots_burst(fixture, current_stats, history):
 
 
 def corner_spam(fixture, current_stats, history):
-    """Corner surge. 4+ = SAFE, 3 = MEDIUM."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 25 or minute > 85:
         return None
@@ -220,7 +291,6 @@ def corner_spam(fixture, current_stats, history):
 
 
 def attack_surge(fixture, current_stats, history):
-    """Dangerous attacks spike."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 25 or minute > 85:
         return None
@@ -243,7 +313,6 @@ def attack_surge(fixture, current_stats, history):
 
 
 def late_push(fixture, current_stats, history):
-    """Trailing team pressing in final 20 min."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 70 or minute > 88:
         return None
@@ -268,7 +337,6 @@ def late_push(fixture, current_stats, history):
 
 
 def htft_swing(fixture, current_stats, history):
-    """Score level but one team dominant -> that team wins FT."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 60 or minute > 78:
         return None
@@ -303,13 +371,17 @@ def htft_swing(fixture, current_stats, history):
 
 
 RULES = [
-    # URGENT (instant moment detection)
+    # URGENT - match-changers
     goal_alert,
-    big_chance,
+    red_card_pressure,
+    rapid_goals,
+    late_equalizer,
+    # MEDIUM event
+    card_storm,
     # SAFE
     dominance_btts,
     over_volume,
-    # MEDIUM
+    # MOMENTUM
     shots_burst,
     corner_spam,
     attack_surge,
