@@ -1,4 +1,4 @@
-"""All database queries. Keep SQL out of business logic."""
+"""All database queries."""
 import json
 from data.db import get_pool
 
@@ -11,8 +11,7 @@ async def upsert_user(telegram_id: int, username: str | None) -> None:
             insert into users (telegram_id, username)
             values ($1, $2)
             on conflict (telegram_id) do update
-              set username = excluded.username,
-                  is_active = true
+              set username = excluded.username, is_active = true
             """,
             telegram_id, username,
         )
@@ -82,10 +81,8 @@ async def recent_snapshots(fixture_id: int, limit: int = 20) -> list[dict]:
         rows = await conn.fetch(
             """
             select minute, home_score, away_score, stats, taken_at
-            from fixture_snapshots
-            where fixture_id = $1
-            order by taken_at desc
-            limit $2
+            from fixture_snapshots where fixture_id = $1
+            order by taken_at desc limit $2
             """,
             fixture_id, limit,
         )
@@ -120,11 +117,8 @@ async def record_cooldown(fixture_id: int, rule_name: str) -> None:
         )
 
 
-async def insert_signal(
-    sport: str, market: str, fixture_id: int, fixture_label: str,
-    league: str, minute: int, rule_name: str, criteria: dict,
-    suggested_bet: str, confidence: int,
-) -> int:
+async def insert_signal(sport, market, fixture_id, fixture_label, league,
+                        minute, rule_name, criteria, suggested_bet, confidence) -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
         sig_id = await conn.fetchval(
@@ -141,8 +135,7 @@ async def insert_signal(
     return sig_id
 
 
-async def record_notification(signal_id: int, user_id: int,
-                              delivered: bool, error: str | None = None) -> None:
+async def record_notification(signal_id, user_id, delivered, error=None) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -160,11 +153,10 @@ async def user_stats(user_id: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            select
-              count(*)                                       as total,
-              count(*) filter (where s.status = 'won')       as won,
-              count(*) filter (where s.status = 'lost')      as lost,
-              count(*) filter (where s.status = 'pending')   as pending
+            select count(*) as total,
+              count(*) filter (where s.status = 'won') as won,
+              count(*) filter (where s.status = 'lost') as lost,
+              count(*) filter (where s.status = 'pending') as pending
             from notifications n
             join signals s on s.id = n.signal_id
             where n.user_id = $1 and n.delivered = true
@@ -182,20 +174,18 @@ async def pending_signals_for_resolution() -> list[dict]:
             select id, sport, market, fixture_id, criteria, suggested_bet, fired_at
             from signals
             where status = 'pending' and fired_at < now() - interval '15 minutes'
-            order by fired_at asc
-            limit 50
+            order by fired_at asc limit 50
             """
         )
     return [dict(r) for r in rows]
 
 
-async def resolve_signal(signal_id: int, status: str, note: str | None = None) -> None:
+async def resolve_signal(signal_id, status, note=None) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            update signals
-            set status = $2, resolved_at = now(), outcome_note = $3
+            update signals set status = $2, resolved_at = now(), outcome_note = $3
             where id = $1
             """,
             signal_id, status, note,
@@ -203,8 +193,6 @@ async def resolve_signal(signal_id: int, status: str, note: str | None = None) -
 
 
 async def get_active_fixtures(within_minutes: int = 3, limit: int = 15) -> list[dict]:
-    """Fixtures with a fresh snapshot in the last N minutes — what the engine
-    is actively watching right now. Used by the bot's 'Live now' menu."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -214,9 +202,26 @@ async def get_active_fixtures(within_minutes: int = 3, limit: int = 15) -> list[
                 fixture_label, league, taken_at
             from fixture_snapshots
             where taken_at > now() - ($1 || ' minutes')::interval
-            order by fixture_id, taken_at desc
-            limit $2
+            order by fixture_id, taken_at desc limit $2
             """,
             str(within_minutes), limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_recent_signals(limit: int = 10) -> list[dict]:
+    """Most recent signals system-wide — used by the History menu.
+    Anyone can see this regardless of whether they were notified."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            select id, sport, market, fixture_label, league, minute,
+                   suggested_bet, confidence, fired_at, status, rule_name
+            from signals
+            order by fired_at desc
+            limit $1
+            """,
+            limit,
         )
     return [dict(r) for r in rows]
