@@ -78,13 +78,14 @@ async def _process_fixture(fx: dict) -> None:
         except Exception:
             log.exception("Enrichment failed for signal %s", signal_id)
 
-        await dispatch_signal(
-            signal_id=signal_id, sport="football", market=signal.market,
-            fixture_label=label, league=league, minute=minute,
-            home_goals=home_goals, away_goals=away_goals,
-            suggested_bet=signal.suggested_bet, confidence=signal.confidence,
-            rule_name=signal.rule_name, tier=signal.tier, narrative=narrative,
-        )
+       await dispatch_signal(
+    signal_id=signal_id,
+    sport="football",
+    market=signal.market,
+    ...
+    tier=signal.tier,
+    narrative=narrative,
+)
 
 
 async def run_forever() -> None:
