@@ -75,12 +75,28 @@ async def _route_menu(parts: list[str], query) -> None:
         )
 
     elif action == "live":
+        active = await models.get_active_fixtures(within_minutes=3)
+        if not active:
+            text = (
+                "🔴 *Live signals*\n\n"
+                "No active games being watched right now. "
+                "Either no football is currently live, or the engine hasn't "
+                "had time to snapshot yet. Check back soon."
+            )
+        else:
+            lines = ["🔴 *Live now*  ·  games the engine is watching\n"]
+            for fx in active:
+                label = fx.get("fixture_label") or f"Fixture {fx.get('fixture_id')}"
+                league = fx.get("league") or "—"
+                lines.append(
+                    f"⚽ *{label}*\n"
+                    f"   {fx.get('home_score', 0)} — {fx.get('away_score', 0)}  ·  "
+                    f"{fx.get('minute', 0)}'  ·  {league}\n"
+                )
+            lines.append("_updated within the last ~3 minutes_")
+            text = "\n".join(lines)
         await query.edit_message_text(
-            "🔴 *Live signals*\n\n"
-            "No active signals right now. We'll ping you the second "
-            "one of your pinned markets fires.",
-            reply_markup=menus.back_menu(),
-            parse_mode="Markdown",
+            text, reply_markup=menus.back_menu(), parse_mode="Markdown"
         )
 
     elif action == "upcoming":
