@@ -1,5 +1,4 @@
-"""Sends signals to users whose pins match the signal's market.
-Sanitizes Claude's narrative to keep Telegram's Markdown happy."""
+"""Signal sender with risk-tier headers."""
 import logging
 import httpx
 
@@ -20,9 +19,6 @@ CONFIDENCE_DOTS = {
 
 
 def _sanitize_for_markdown(text):
-    """Strip characters that break Telegram's Markdown entity parser.
-    We told Claude not to use markdown formatting, but it sometimes
-    sneaks them in. This makes it bulletproof."""
     if not text:
         return text
     for char in ("_", "*", "[", "]", "(", ")", "`"):
@@ -30,22 +26,35 @@ def _sanitize_for_markdown(text):
     return text
 
 
+def _build_header(tier, risk, market, confidence):
+    dots = CONFIDENCE_DOTS.get(confidence, "\U0001f7e0")
+    market_up = market.upper()
+    if tier == "watch":
+        return (
+            f"\U0001f440 *WATCHING \u00b7 {market_up}*  "
+            f"\u00b7  {dots} {confidence}/5"
+        )
+    if risk == "safe":
+        return (
+            f"\U0001f7e2 *SAFE PLAY \u00b7 {market_up}*  "
+            f"\u00b7  {dots} {confidence}/5"
+        )
+    if risk == "risky":
+        return (
+            f"\U0001f534 *RISKY PLAY \u00b7 {market_up}*  "
+            f"\u00b7  {dots} {confidence}/5"
+        )
+    # default medium
+    return (
+        f"\U0001f7e1 *MEDIUM SIGNAL \u00b7 {market_up}*  "
+        f"\u00b7  {dots} {confidence}/5"
+    )
+
+
 def _format_signal(fixture_label, league, minute, home_goals, away_goals,
                    market, suggested_bet, confidence, rule_name, tier,
-                   narrative):
-    is_watch = tier == "watch"
-    dots = CONFIDENCE_DOTS.get(confidence, "\U0001f7e0")
-
-    if is_watch:
-        header = (
-            f"\U0001f440 *WATCHING \u00b7 {market.upper()}*  \u00b7  "
-            f"{dots} {confidence}/5"
-        )
-    else:
-        header = (
-            f"\U0001f534 *LIVE SIGNAL \u00b7 {market.upper()}*  \u00b7  "
-            f"{dots} {confidence}/5"
-        )
+                   narrative, risk="medium"):
+    header = _build_header(tier, risk, market, confidence)
 
     parts = [
         header,
@@ -61,10 +70,10 @@ def _format_signal(fixture_label, league, minute, home_goals, away_goals,
         parts.append(clean)
 
     parts.append("")
-    if is_watch:
+    if tier == "watch":
         parts.append(
             "\u2139\ufe0f _The engine is watching this game. "
-            "Not a bet — just a heads-up._"
+            "Not a bet - just a heads-up._"
         )
     else:
         parts.append("\U0001f4a1 *BET*")
@@ -80,7 +89,7 @@ def _format_signal(fixture_label, league, minute, home_goals, away_goals,
 async def dispatch_signal(signal_id, sport, market, fixture_label, league,
                           minute, home_goals, away_goals, suggested_bet,
                           confidence, rule_name="", tier="signal",
-                          narrative=None):
+                          narrative=None, risk="medium"):
     user_ids = await models.get_users_for_market(sport, market)
     if not user_ids:
         log.info(
@@ -92,6 +101,7 @@ async def dispatch_signal(signal_id, sport, market, fixture_label, league,
     text = _format_signal(
         fixture_label, league, minute, home_goals, away_goals,
         market, suggested_bet, confidence, rule_name, tier, narrative,
+        risk=risk,
     )
 
     async with httpx.AsyncClient(timeout=10) as client:
