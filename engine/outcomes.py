@@ -1,5 +1,5 @@
 """Silently resolve pending signals. Marks WON/LOST in DB.
-No follow-up messages sent. History menu shows the result."""
+No follow-up messages. History menu shows the result."""
 import logging
 
 from data import models
@@ -35,8 +35,14 @@ def _total_yellows(stats):
     return total
 
 
+def _total_reds(stats):
+    total = 0
+    for team_stats in (stats or {}).values():
+        total += _safe_int(team_stats.get("Red Cards"))
+    return total
+
+
 async def resolve_pending():
-    """Check pending signals - mark as won/lost silently in DB."""
     signals = await models.pending_signals_for_resolution()
     if not signals:
         return
@@ -60,12 +66,11 @@ async def _resolve_one(sig):
     if not snapshots:
         return
 
-    # Find the snapshot closest to fired minute (going forward in time)
-    at_fired = None
     sorted_by_minute = sorted(
         [s for s in snapshots if s.get("minute") is not None],
         key=lambda x: x["minute"],
     )
+    at_fired = None
     for s in sorted_by_minute:
         if s["minute"] >= fired_minute:
             at_fired = s
@@ -73,9 +78,7 @@ async def _resolve_one(sig):
     if not at_fired:
         return
 
-    latest = sorted_by_minute[-1] if sorted_by_minute else None
-    if not latest:
-        return
+    latest = sorted_by_minute[-1]
     latest_minute = _safe_int(latest.get("minute"))
 
     if market == "goals":
@@ -87,7 +90,7 @@ async def _resolve_one(sig):
     elif market == "shots":
         await _resolve_shots(sig, criteria, latest, latest_minute)
     elif market == "cards":
-        await _resolve_cards(sig, at_fired, latest, latest_minute, fired_minute)
+        await _resolve_cards(sig, criteria, latest, latest_minute)
 
 
 async def _resolve_goals(sig, at_fired, latest, latest_minute, fired_minute):
@@ -99,7 +102,6 @@ async def _resolve_goals(sig, at_fired, latest, latest_minute, fired_minute):
         _safe_int(latest.get("home_score"))
         + _safe_int(latest.get("away_score"))
     )
-    # 12 min window for goals signals
     if latest_minute - fired_minute >= 12 or latest_minute >= 92:
         if now_total > base_total:
             await models.resolve_signal(
@@ -146,7 +148,6 @@ async def _resolve_shots(sig, criteria, latest, latest_minute):
     if latest_minute < 90:
         return
     now_shots = _total_shots(latest.get("stats"))
-    # Signal said "over X.5" where X = total_shots at fire + 6
     base = _safe_int(criteria.get("total_shots"))
     target = base + 6
     if now_shots > target:
@@ -161,17 +162,21 @@ async def _resolve_shots(sig, criteria, latest, latest_minute):
         log.info("Signal %s LOST (shots)", sig["id"])
 
 
-async def _resolve_cards(sig, at_fired, latest, latest_minute, fired_minute):
-    base_y = _total_yellows(at_fired.get("stats"))
-    now_y = _total_yellows(latest.get("stats"))
-    if latest_minute - fired_minute >= 10 or latest_minute >= 92:
-        if now_y >= base_y + 2 or now_y >= 5:
-            await models.resolve_signal(
-                sig["id"], "won", f"Cards continued: {base_y} -> {now_y}",
-            )
-            log.info("Signal %s WON (cards)", sig["id"])
-        elif latest_minute >= 92:
-            await models.resolve_signal(
-                sig["id"], "lost", f"Cards stayed at {now_y}",
-            )
-            log.info("Signal %s LOST (cards)", sig["id"])
+async def _resolve_cards(sig, criteria, latest, latest_minute):
+    """Cards bet is 'over 5.5 total cards by FT' - resolve at end of match."""
+    if latest_minute < 90:
+        return
+    total_y = _total_yellows(latest.get("stats"))
+    total_r = _total_reds(latest.get("stats"))
+    # Total cards = yellows + 2*reds (a red usually = 2 cards for stats purposes)
+    total_cards = total_y + total_r
+    if total_cards >= 6:
+        await models.resolve_signal(
+            sig["id"], "won", f"Total cards {total_cards} (>= 6)",
+        )
+        log.info("Signal %s WON (cards)", sig["id"])
+    else:
+        await models.resolve_signal(
+            sig["id"], "lost", f"Only {total_cards} cards total",
+        )
+        log.info("Signal %s LOST (cards)", sig["id"])
