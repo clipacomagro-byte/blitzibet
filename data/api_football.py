@@ -1,7 +1,7 @@
 """SportMonks football data client.
 
-Replaces the original API-Football client. Same function signatures and
-response shapes — the rest of the engine doesn't need to change.
+Same function signatures as the original API-Football client — rest of the
+engine doesn't need to change.
 
 Docs: https://docs.sportmonks.com/v3/
 """
@@ -13,15 +13,13 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.sportmonks.com/v3/football"
 
-# SportMonks stat type_id → name used by engine/rules.py.
-# Reference: https://docs.sportmonks.com/v3/definitions/types/statistics
 STAT_TYPE_MAP = {
-    86: "Shots on Goal",        # shots on target
+    86: "Shots on Goal",
     41: "Total Shots",
     34: "Corner Kicks",
     44: "Dangerous Attacks",
     43: "Attacks",
-    45: "Ball Possession",      # percentage
+    45: "Ball Possession",
     49: "Shots off Goal",
     51: "Offsides",
     56: "Fouls",
@@ -31,12 +29,10 @@ STAT_TYPE_MAP = {
     64: "Red Cards",
 }
 
-# In-memory cache so we don't re-fetch stats per fixture in the same poll cycle.
 _stats_cache: dict[int, list] = {}
 
 
 class APIFootballError(Exception):
-    """Kept the name so existing error handling still works."""
     pass
 
 
@@ -48,7 +44,6 @@ def _params(extra: dict | None = None) -> dict:
 
 
 async def probe() -> dict:
-    """Verify the token works. Mirrors the API-Football probe contract."""
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
             f"{BASE_URL}/livescores/inplay",
@@ -62,12 +57,6 @@ async def probe() -> dict:
 
 
 async def live_fixtures(league_ids: list[int] | None = None) -> list[dict]:
-    """All currently live fixtures with stats embedded.
-    
-    One API call gets fixtures AND their stats AND scores — much cheaper
-    than API-Football's 1+N pattern. Caches per-fixture stats so the
-    follow-up fixture_statistics(id) call hits memory, not the network.
-    """
     params = _params({
         "include": "participants;statistics;scores;periods;state;league",
     })
@@ -86,20 +75,22 @@ async def live_fixtures(league_ids: list[int] | None = None) -> list[dict]:
     for fx in data["data"]:
         reshaped, cached_stats = _reshape_fixture(fx)
         fixtures.append(reshaped)
-        _stats_cache[reshaped["fixture"]["id"]] = cached_stats
+        if reshaped["fixture"]["id"] is not None:
+            _stats_cache[reshaped["fixture"]["id"]] = cached_stats
     return fixtures
 
 
 def _reshape_fixture(fx: dict) -> tuple[dict, list]:
-    """Convert one SportMonks fixture to API-Football-ish shape.
-    Returns (fixture_dict, prepared_stats_list_for_cache).
-    """
-    # participants: home/away teams
     participants = fx.get("participants") or []
-    home = next((p for p in participants if (p.get("meta") or {}).get("location") == "home"), {})
-    away = next((p for p in participants if (p.get("meta") or {}).get("location") == "away"), {})
+    home = next(
+        (p for p in participants if (p.get("meta") or {}).get("location") == "home"),
+        {},
+    )
+    away = next(
+        (p for p in participants if (p.get("meta") or {}).get("location") == "away"),
+        {},
+    )
 
-    # scores: pick the "CURRENT" score per side
     home_score, away_score = 0, 0
     for s in fx.get("scores") or []:
         if s.get("description") != "CURRENT":
@@ -112,14 +103,12 @@ def _reshape_fixture(fx: dict) -> tuple[dict, list]:
         elif side == "away":
             away_score = goals
 
-    # minute: from the actively ticking period
     minute = 0
     for p in fx.get("periods") or []:
         if p.get("ticking"):
             minute = p.get("minutes") or 0
             break
 
-    # statistics grouped by team -> API-Football style
     by_team: dict[int, list] = {}
     for stat in fx.get("statistics") or []:
         team_id = stat.get("participant_id")
@@ -135,7 +124,9 @@ def _reshape_fixture(fx: dict) -> tuple[dict, list]:
             "value": value,
         })
 
-    stats_list = [{"team": {"id": tid}, "statistics": s} for tid, s in by_team.items()]
+    stats_list = [
+        {"team": {"id": tid}, "statistics": s} for tid, s in by_team.items()
+    ]
 
     league = fx.get("league") or {}
     fixture_dict = {
@@ -154,8 +145,6 @@ def _reshape_fixture(fx: dict) -> tuple[dict, list]:
 
 
 async def fixture_statistics(fixture_id: int) -> list[dict]:
-    """Stats for one fixture. Hits the in-memory cache first (populated by
-    live_fixtures), falls back to a network call if missing."""
     cached = _stats_cache.get(fixture_id)
     if cached is not None:
         return cached
@@ -186,8 +175,23 @@ async def fixture_statistics(fixture_id: int) -> list[dict]:
     return [{"team": {"id": tid}, "statistics": s} for tid, s in by_team.items()]
 
 
+async def head_to_head(team1_id: int, team2_id: int, last_n: int = 5) -> list[dict]:
+    """Last N head-to-head fixtures between two teams. Returns [] on error."""
+    params = _params({"include": "participants;scores"})
+    url = f"{BASE_URL}/fixtures/head-to-head/{team1_id}/{team2_id}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        log.warning("H2H request failed for %s vs %s: %s", team1_id, team2_id, e)
+        return []
+    fixtures = data.get("data") or []
+    return fixtures[:last_n]
+
+
 async def fixture_events(fixture_id: int) -> list[dict]:
-    """Events (goals, cards) — used for outcome resolution."""
     params = _params({"include": "events"})
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(f"{BASE_URL}/fixtures/{fixture_id}", params=params)
@@ -197,7 +201,6 @@ async def fixture_events(fixture_id: int) -> list[dict]:
     events = fx.get("events") or []
     out = []
     for ev in events:
-        # type_id 14 = Goal in SportMonks
         is_goal = ev.get("type_id") == 14
         out.append({
             "type": "Goal" if is_goal else ((ev.get("type") or {}).get("name") or "Other"),
@@ -207,7 +210,6 @@ async def fixture_events(fixture_id: int) -> list[dict]:
 
 
 def stats_to_dict(stats_response: list[dict]) -> dict[int, dict]:
-    """Flatten to {team_id: {stat_name: value}}. Unchanged from API-Football."""
     out: dict[int, dict] = {}
     for team_block in stats_response:
         team_id = (team_block.get("team") or {}).get("id")
