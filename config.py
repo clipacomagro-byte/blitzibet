@@ -15,14 +15,17 @@ def _required(name: str) -> str:
 # Telegram
 TELEGRAM_BOT_TOKEN = _required("TELEGRAM_BOT_TOKEN")
 
-# Database
+# Database (Supabase Postgres pooler URI)
 DATABASE_URL = _required("DATABASE_URL")
 
-# API-Football
+# Sports data (SportMonks). Keeping the var name for backward-compat with old deploys.
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
-API_FOOTBALL_HOST = os.getenv("API_FOOTBALL_HOST", "v3.football.api-sports.io")
 
-# Engine
+# Claude AI for signal narratives. If unset, signals still fire — just without AI commentary.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+# Engine tuning
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "10"))
 
