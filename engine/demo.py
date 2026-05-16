@@ -1,9 +1,5 @@
 """Demo mode — fires synthetic signals on a schedule so the bot can be
-demonstrated without a working live-data feed.
-
-Activated when env var DEMO_MODE=true (or 1/yes). Signals look real,
-go through Claude enrichment, and land in users' Telegrams.
-"""
+demonstrated without a working live-data feed."""
 import logging
 import random
 
@@ -17,7 +13,7 @@ log = logging.getLogger("blitzibet.demo")
 
 DEMO_MATCHES = [
     {"home_id": 529, "home_name": "Barcelona",
-     "away_id": 530, "away_name": "Atlético Madrid", "league": "La Liga"},
+     "away_id": 530, "away_name": "Atletico Madrid", "league": "La Liga"},
     {"home_id": 541, "home_name": "Real Madrid",
      "away_id": 548, "away_name": "Real Sociedad", "league": "La Liga"},
     {"home_id": 33,  "home_name": "Manchester United",
@@ -32,27 +28,21 @@ DEMO_MATCHES = [
 
 
 DEMO_SCENARIOS = [
+    # ===== GOALS =====
     {
         "rule_name": "shots_burst", "market": "goals",
         "minute": 67, "home_goals": 1, "away_goals": 1,
         "suggested_bet": "Next goal within ~10 min · Over current line",
         "confidence": 4, "tier": "signal",
         "criteria": {"shots_delta": 4, "window_min": 10, "minute": 67},
-        "home_stats": {"Shots on Goal": 5, "Total Shots": 12, "Corner Kicks": 4,
-                       "Dangerous Attacks": 38, "Ball Possession": 64},
-        "away_stats": {"Shots on Goal": 2, "Total Shots": 6, "Corner Kicks": 2,
-                       "Dangerous Attacks": 18, "Ball Possession": 36},
-    },
-    {
-        "rule_name": "corner_spam_watch", "market": "corners",
-        "minute": 54, "home_goals": 0, "away_goals": 1,
-        "suggested_bet": "Watch tier · not a bet recommendation",
-        "confidence": 2, "tier": "watch",
-        "criteria": {"corners_delta": 3, "window_min": 10, "minute": 54},
-        "home_stats": {"Shots on Goal": 3, "Total Shots": 9, "Corner Kicks": 6,
-                       "Dangerous Attacks": 28, "Ball Possession": 55},
-        "away_stats": {"Shots on Goal": 4, "Total Shots": 7, "Corner Kicks": 2,
-                       "Dangerous Attacks": 22, "Ball Possession": 45},
+        "home_stats": {
+            "Shots on Goal": 5, "Total Shots": 12, "Corner Kicks": 4,
+            "Dangerous Attacks": 38, "Ball Possession": 64,
+        },
+        "away_stats": {
+            "Shots on Goal": 2, "Total Shots": 6, "Corner Kicks": 2,
+            "Dangerous Attacks": 18, "Ball Possession": 36,
+        },
     },
     {
         "rule_name": "late_push", "market": "goals",
@@ -60,37 +50,131 @@ DEMO_SCENARIOS = [
         "suggested_bet": "Trailing team to score next · BTTS yes",
         "confidence": 3, "tier": "signal",
         "criteria": {"trailing_team": 0, "dangerous_attacks": 42, "possession": 58},
-        "home_stats": {"Shots on Goal": 4, "Total Shots": 11, "Corner Kicks": 5,
-                       "Dangerous Attacks": 28, "Ball Possession": 42},
-        "away_stats": {"Shots on Goal": 5, "Total Shots": 9, "Corner Kicks": 3,
-                       "Dangerous Attacks": 42, "Ball Possession": 58},
+        "home_stats": {
+            "Shots on Goal": 4, "Total Shots": 11, "Corner Kicks": 5,
+            "Dangerous Attacks": 28, "Ball Possession": 42,
+        },
+        "away_stats": {
+            "Shots on Goal": 5, "Total Shots": 9, "Corner Kicks": 3,
+            "Dangerous Attacks": 42, "Ball Possession": 58,
+        },
     },
+    # ===== CORNERS =====
     {
         "rule_name": "corner_spam", "market": "corners",
         "minute": 72, "home_goals": 1, "away_goals": 0,
         "suggested_bet": "Next corner within ~5 min · Over current line",
         "confidence": 4, "tier": "signal",
         "criteria": {"corners_delta": 5, "window_min": 10, "minute": 72},
-        "home_stats": {"Shots on Goal": 4, "Total Shots": 10, "Corner Kicks": 9,
-                       "Dangerous Attacks": 34, "Ball Possession": 61},
-        "away_stats": {"Shots on Goal": 1, "Total Shots": 4, "Corner Kicks": 2,
-                       "Dangerous Attacks": 14, "Ball Possession": 39},
+        "home_stats": {
+            "Shots on Goal": 4, "Total Shots": 10, "Corner Kicks": 9,
+            "Dangerous Attacks": 34, "Ball Possession": 61,
+        },
+        "away_stats": {
+            "Shots on Goal": 1, "Total Shots": 4, "Corner Kicks": 2,
+            "Dangerous Attacks": 14, "Ball Possession": 39,
+        },
+    },
+    {
+        "rule_name": "corner_spam_watch", "market": "corners",
+        "minute": 54, "home_goals": 0, "away_goals": 1,
+        "suggested_bet": "Watch tier · not a bet recommendation",
+        "confidence": 2, "tier": "watch",
+        "criteria": {"corners_delta": 3, "window_min": 10, "minute": 54},
+        "home_stats": {
+            "Shots on Goal": 3, "Total Shots": 9, "Corner Kicks": 6,
+            "Dangerous Attacks": 28, "Ball Possession": 55,
+        },
+        "away_stats": {
+            "Shots on Goal": 4, "Total Shots": 7, "Corner Kicks": 2,
+            "Dangerous Attacks": 22, "Ball Possession": 45,
+        },
+    },
+    # ===== CARDS =====
+    {
+        "rule_name": "cards_pressure", "market": "cards",
+        "minute": 71, "home_goals": 1, "away_goals": 1,
+        "suggested_bet": "Over 4.5 total cards · next yellow within ~10 min",
+        "confidence": 3, "tier": "signal",
+        "criteria": {"fouls_delta": 5, "minute": 71, "yellows": 4},
+        "home_stats": {
+            "Shots on Goal": 3, "Total Shots": 8, "Corner Kicks": 4,
+            "Dangerous Attacks": 28, "Ball Possession": 52,
+            "Yellow Cards": 3, "Fouls": 12,
+        },
+        "away_stats": {
+            "Shots on Goal": 2, "Total Shots": 7, "Corner Kicks": 3,
+            "Dangerous Attacks": 25, "Ball Possession": 48,
+            "Yellow Cards": 2, "Fouls": 14,
+        },
+    },
+    # ===== SHOTS =====
+    {
+        "rule_name": "shots_volume", "market": "shots",
+        "minute": 58, "home_goals": 2, "away_goals": 2,
+        "suggested_bet": "Over 12.5 total shots in next 15 min",
+        "confidence": 4, "tier": "signal",
+        "criteria": {"shots_delta": 7, "minute": 58, "total_shots": 18},
+        "home_stats": {
+            "Shots on Goal": 6, "Total Shots": 11, "Corner Kicks": 5,
+            "Dangerous Attacks": 36, "Ball Possession": 53,
+        },
+        "away_stats": {
+            "Shots on Goal": 4, "Total Shots": 9, "Corner Kicks": 3,
+            "Dangerous Attacks": 31, "Ball Possession": 47,
+        },
+    },
+    # ===== BTTS =====
+    {
+        "rule_name": "btts_pressure", "market": "btts",
+        "minute": 64, "home_goals": 1, "away_goals": 0,
+        "suggested_bet": "BTTS yes · away team to score by 80'",
+        "confidence": 3, "tier": "signal",
+        "criteria": {"trailing_da": 38, "minute": 64},
+        "home_stats": {
+            "Shots on Goal": 4, "Total Shots": 10, "Corner Kicks": 4,
+            "Dangerous Attacks": 30, "Ball Possession": 47,
+        },
+        "away_stats": {
+            "Shots on Goal": 5, "Total Shots": 9, "Corner Kicks": 3,
+            "Dangerous Attacks": 38, "Ball Possession": 53,
+        },
+    },
+    # ===== HT/FT =====
+    {
+        "rule_name": "htft_swing", "market": "htft",
+        "minute": 78, "home_goals": 1, "away_goals": 1,
+        "suggested_bet": "Draw HT / Home win FT",
+        "confidence": 3, "tier": "signal",
+        "criteria": {"home_pressure": 42, "minute": 78},
+        "home_stats": {
+            "Shots on Goal": 6, "Total Shots": 13, "Corner Kicks": 7,
+            "Dangerous Attacks": 42, "Ball Possession": 60,
+        },
+        "away_stats": {
+            "Shots on Goal": 2, "Total Shots": 5, "Corner Kicks": 2,
+            "Dangerous Attacks": 22, "Ball Possession": 40,
+        },
     },
 ]
 
 
-async def fire_demo_signal() -> None:
+async def fire_demo_signal():
     """Pick a random match + scenario and run it through the full pipeline."""
     match = random.choice(DEMO_MATCHES)
     scenario = random.choice(DEMO_SCENARIOS)
     label = f"{match['home_name']} v {match['away_name']}"
 
-    log.info("[DEMO] firing %s on %s (tier=%s)",
-             scenario["rule_name"], label, scenario["tier"])
+    log.info(
+        "[DEMO] firing %s on %s (tier=%s)",
+        scenario["rule_name"], label, scenario["tier"],
+    )
 
     fake_fixture = {
-        "fixture": {"id": 999000 + random.randint(0, 9999),
-                    "status": {"elapsed": scenario["minute"]}},
+        "fixture": {
+            "id": 999000 + random.randint(0, 9999),
+            "status": {"elapsed": scenario["minute"]},
+        },
         "teams": {
             "home": {"id": match["home_id"], "name": match["home_name"]},
             "away": {"id": match["away_id"], "name": match["away_name"]},
@@ -127,7 +211,9 @@ async def fire_demo_signal() -> None:
 
     narrative = None
     try:
-        narrative = await build_narrative(fake_fixture, fake_stats, [], fake_signal)
+        narrative = await build_narrative(
+            fake_fixture, fake_stats, [], fake_signal,
+        )
     except Exception:
         log.exception("[DEMO] enrichment failed")
 
