@@ -1,5 +1,4 @@
-"""Sends signals. Renders match info + structured live stats + Claude narrative.
-Filters by user's league preferences."""
+"""Sends signals. Sanitizes rule names + has Markdown->plain fallback."""
 import logging
 import httpx
 
@@ -25,6 +24,11 @@ def _sanitize_for_markdown(text):
     for char in ("_", "*", "[", "]", "(", ")", "`"):
         text = text.replace(char, "")
     return text
+
+
+def _safe_rule_name(rule_name):
+    """Replace underscores so Telegram italic doesn't break."""
+    return (rule_name or "").replace("_", "-")
 
 
 def build_stats_block(stats_by_team, home_id, away_id):
@@ -75,6 +79,7 @@ def _build_header(tier, risk, market, confidence):
 def _format_signal(fixture_label, league, minute, home_goals, away_goals,
                    market, suggested_bet, confidence, rule_name, tier,
                    narrative, risk="medium", stats_block=None):
+    safe_rule = _safe_rule_name(rule_name)
     parts = [
         _build_header(tier, risk, market, confidence),
         "",
@@ -101,9 +106,42 @@ def _format_signal(fixture_label, league, minute, home_goals, away_goals,
 
     parts.append("")
     parts.append(
-        f"_rule: {rule_name}  \u00b7  powered by Blitzibet + Claude_"
+        f"_rule: {safe_rule}  \u00b7  powered by Blitzibet + Claude_"
     )
     return "\n".join(parts)
+
+
+async def _send_to_user(client, uid, text):
+    """Try Markdown first, fall back to plain on 400. Returns (ok, msg_id, error)."""
+    try:
+        r = await client.post(TG_API, json={
+            "chat_id": uid,
+            "text": text,
+            "parse_mode": "Markdown",
+        })
+        data = r.json()
+        if r.status_code == 200 and data.get("ok"):
+            msg_id = data.get("result", {}).get("message_id")
+            return True, msg_id, None
+        log.warning(
+            "Markdown send failed for %s: %s - retrying plain",
+            uid, data.get("description", "")[:100],
+        )
+    except Exception as e:
+        log.warning("Markdown send raised for %s: %s - retrying plain", uid, e)
+
+    try:
+        r = await client.post(TG_API, json={
+            "chat_id": uid,
+            "text": text,
+        })
+        data = r.json()
+        if r.status_code == 200 and data.get("ok"):
+            msg_id = data.get("result", {}).get("message_id")
+            return True, msg_id, None
+        return False, None, (data.get("description") or r.text)[:200]
+    except Exception as e:
+        return False, None, str(e)[:200]
 
 
 async def dispatch_signal(signal_id, sport, market, fixture_label, league,
@@ -127,24 +165,13 @@ async def dispatch_signal(signal_id, sport, market, fixture_label, league,
     async with httpx.AsyncClient(timeout=10) as client:
         for uid in user_ids:
             try:
-                r = await client.post(TG_API, json={
-                    "chat_id": uid,
-                    "text": text,
-                    "parse_mode": "Markdown",
-                })
-                response_data = r.json()
-                ok = r.status_code == 200 and response_data.get("ok")
-                await models.record_notification(
-                    signal_id, uid, ok,
-                    None if ok else r.text[:200],
-                )
-                if ok:
-                    msg_id = response_data.get("result", {}).get("message_id")
-                    if msg_id:
-                        try:
-                            await models.track_bot_message(uid, msg_id)
-                        except Exception:
-                            pass
+                ok, msg_id, error = await _send_to_user(client, uid, text)
+                await models.record_notification(signal_id, uid, ok, error)
+                if ok and msg_id:
+                    try:
+                        await models.track_bot_message(uid, msg_id)
+                    except Exception:
+                        pass
             except Exception as e:
                 log.exception("Send failed to %s: %s", uid, e)
                 await models.record_notification(
