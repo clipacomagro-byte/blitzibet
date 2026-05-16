@@ -3,8 +3,6 @@ import json
 from data.db import get_pool
 
 
-# ---- users ----
-
 async def upsert_user(telegram_id: int, username: str | None) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -20,10 +18,7 @@ async def upsert_user(telegram_id: int, username: str | None) -> None:
         )
 
 
-# ---- pins ----
-
 async def toggle_pin(user_id: int, sport: str, market: str) -> bool:
-    """Toggle a pin. Returns True if now pinned, False if just unpinned."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         existing = await conn.fetchval(
@@ -64,18 +59,20 @@ async def get_users_for_market(sport: str, market: str) -> list[int]:
     return [r["telegram_id"] for r in rows]
 
 
-# ---- snapshots ----
-
 async def save_snapshot(fixture_id: int, minute: int, home_score: int,
-                        away_score: int, stats: dict) -> None:
+                        away_score: int, stats: dict,
+                        fixture_label: str = "", league: str = "") -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            insert into fixture_snapshots (fixture_id, minute, home_score, away_score, stats)
-            values ($1, $2, $3, $4, $5)
+            insert into fixture_snapshots
+                (fixture_id, minute, home_score, away_score, stats,
+                 fixture_label, league)
+            values ($1, $2, $3, $4, $5, $6, $7)
             """,
             fixture_id, minute, home_score, away_score, json.dumps(stats),
+            fixture_label, league,
         )
 
 
@@ -94,8 +91,6 @@ async def recent_snapshots(fixture_id: int, limit: int = 20) -> list[dict]:
         )
     return [dict(r) for r in rows]
 
-
-# ---- cooldowns ----
 
 async def is_on_cooldown(fixture_id: int, rule_name: str, minutes: int) -> bool:
     pool = await get_pool()
@@ -124,8 +119,6 @@ async def record_cooldown(fixture_id: int, rule_name: str) -> None:
             fixture_id, rule_name,
         )
 
-
-# ---- signals ----
 
 async def insert_signal(
     sport: str, market: str, fixture_id: int, fixture_label: str,
@@ -163,7 +156,6 @@ async def record_notification(signal_id: int, user_id: int,
 
 
 async def user_stats(user_id: int) -> dict:
-    """Win/loss summary for a user, scoped to signals matching their pins."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -183,7 +175,6 @@ async def user_stats(user_id: int) -> dict:
 
 
 async def pending_signals_for_resolution() -> list[dict]:
-    """Signals still pending more than 15 minutes after firing — outcome worker."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -209,3 +200,23 @@ async def resolve_signal(signal_id: int, status: str, note: str | None = None) -
             """,
             signal_id, status, note,
         )
+
+
+async def get_active_fixtures(within_minutes: int = 3, limit: int = 15) -> list[dict]:
+    """Fixtures with a fresh snapshot in the last N minutes — what the engine
+    is actively watching right now. Used by the bot's 'Live now' menu."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            select distinct on (fixture_id)
+                fixture_id, minute, home_score, away_score,
+                fixture_label, league, taken_at
+            from fixture_snapshots
+            where taken_at > now() - ($1 || ' minutes')::interval
+            order by fixture_id, taken_at desc
+            limit $2
+            """,
+            str(within_minutes), limit,
+        )
+    return [dict(r) for r in rows]
