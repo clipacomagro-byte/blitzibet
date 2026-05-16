@@ -14,7 +14,7 @@ from engine.notifier import dispatch_signal
 log = logging.getLogger("blitzibet.poller")
 
 
-async def poll_once() -> None:
+async def poll_once():
     log.info("Poll tick at %s", datetime.utcnow().isoformat())
     try:
         live = await api.live_fixtures()
@@ -26,11 +26,13 @@ async def poll_once() -> None:
         try:
             await _process_fixture(fx)
         except Exception:
-            log.exception("Processing failed for fixture %s",
-                          fx.get("fixture", {}).get("id"))
+            log.exception(
+                "Processing failed for fixture %s",
+                fx.get("fixture", {}).get("id"),
+            )
 
 
-async def _process_fixture(fx: dict) -> None:
+async def _process_fixture(fx):
     fixture = fx.get("fixture", {})
     fixture_id = fixture.get("id")
     if not fixture_id:
@@ -57,38 +59,59 @@ async def _process_fixture(fx: dict) -> None:
 
     for rule_fn in rules.RULES:
         rule_base_name = rule_fn.__name__
-        if await models.is_on_cooldown(fixture_id, rule_base_name, SIGNAL_COOLDOWN_MINUTES):
+        if await models.is_on_cooldown(
+            fixture_id, rule_base_name, SIGNAL_COOLDOWN_MINUTES
+        ):
             continue
         signal = rule_fn(fx, stats_by_team, history)
         if signal is None:
             continue
-        log.info("Signal fired: %s (tier=%s) on %s (%s')",
-                 signal.rule_name, signal.tier, label, minute)
+        log.info(
+            "Signal fired: %s (tier=%s, risk=%s) on %s (%s')",
+            signal.rule_name, signal.tier,
+            getattr(signal, "risk", "medium"), label, minute,
+        )
         signal_id = await models.insert_signal(
-            sport="football", market=signal.market, fixture_id=fixture_id,
-            fixture_label=label, league=league, minute=minute,
-            rule_name=signal.rule_name, criteria=signal.criteria,
-            suggested_bet=signal.suggested_bet, confidence=signal.confidence,
+            sport="football",
+            market=signal.market,
+            fixture_id=fixture_id,
+            fixture_label=label,
+            league=league,
+            minute=minute,
+            rule_name=signal.rule_name,
+            criteria=signal.criteria,
+            suggested_bet=signal.suggested_bet,
+            confidence=signal.confidence,
         )
         await models.record_cooldown(fixture_id, rule_base_name)
 
         narrative = None
         try:
-            narrative = await build_narrative(fx, stats_by_team, history, signal)
+            narrative = await build_narrative(
+                fx, stats_by_team, history, signal
+            )
         except Exception:
             log.exception("Enrichment failed for signal %s", signal_id)
 
-       await dispatch_signal(
-    signal_id=signal_id,
-    sport="football",
-    market=signal.market,
-    ...
-    tier=signal.tier,
-    narrative=narrative,
-)
+        await dispatch_signal(
+            signal_id=signal_id,
+            sport="football",
+            market=signal.market,
+            fixture_label=label,
+            league=league,
+            minute=minute,
+            home_goals=home_goals,
+            away_goals=away_goals,
+            suggested_bet=signal.suggested_bet,
+            confidence=signal.confidence,
+            rule_name=signal.rule_name,
+            tier=signal.tier,
+            narrative=narrative,
+            risk=getattr(signal, "risk", "medium"),
+        )
 
 
-async def run_forever() -> None:
+async def run_forever():
     while True:
         await poll_once()
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
