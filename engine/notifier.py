@@ -1,4 +1,5 @@
-"""Sends signals to users whose pins match the signal's market."""
+"""Sends signals to users whose pins match the signal's market.
+Also tracks the message_id of every send so /start can wipe the chat."""
 import logging
 import httpx
 
@@ -53,9 +54,19 @@ async def dispatch_signal(signal_id, sport, market, fixture_label, league,
                 r = await client.post(TG_API, json={
                     "chat_id": uid, "text": text, "parse_mode": "Markdown",
                 })
-                ok = r.status_code == 200 and r.json().get("ok")
-                await models.record_notification(signal_id, uid, ok,
-                                                  None if ok else r.text[:200])
+                response_data = r.json()
+                ok = r.status_code == 200 and response_data.get("ok")
+                await models.record_notification(
+                    signal_id, uid, ok,
+                    None if ok else r.text[:200],
+                )
+                if ok:
+                    msg_id = response_data.get("result", {}).get("message_id")
+                    if msg_id:
+                        try:
+                            await models.track_bot_message(uid, msg_id)
+                        except Exception:
+                            log.warning("Failed to track msg %s for %s", msg_id, uid)
             except Exception as e:
                 log.exception("Send failed to %s: %s", uid, e)
                 await models.record_notification(signal_id, uid, False, str(e)[:200])
