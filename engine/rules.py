@@ -36,7 +36,6 @@ def _team_stat(stats_by_team, team_id, key):
 # =============================================================
 
 def goal_alert(fixture, current_stats, history):
-    """Goal just scored - fire instant alert with new score context."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if not history:
         return None
@@ -63,7 +62,6 @@ def goal_alert(fixture, current_stats, history):
 
 
 def red_card_pressure(fixture, current_stats, history):
-    """Red card after 60' - 10 v 11 changes everything."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 60 or minute > 92:
         return None
@@ -102,7 +100,6 @@ def red_card_pressure(fixture, current_stats, history):
 
 
 def rapid_goals(fixture, current_stats, history):
-    """Two goals in under 5 min - match exploding, over markets in play."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if not history or minute < 5:
         return None
@@ -128,7 +125,6 @@ def rapid_goals(fixture, current_stats, history):
 
 
 def late_equalizer(fixture, current_stats, history):
-    """Equalizer scored after 75' - momentum massively swings."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
     if minute < 75 or minute > 92:
         return None
@@ -144,7 +140,6 @@ def late_equalizer(fixture, current_stats, history):
     base_a = base.get("away_score") or 0
     if base_h == base_a:
         return None
-    # was unequal, now equal -> equalizer
     return Signal(
         rule_name="late_equalizer", market="goals",
         suggested_bet=(
@@ -156,10 +151,14 @@ def late_equalizer(fixture, current_stats, history):
     )
 
 
+# =============================================================
+# Cards rule — TIGHTENED to kill spam
+# =============================================================
+
 def card_storm(fixture, current_stats, history):
-    """2+ yellow cards in under 5 min - heated match, more cards likely."""
+    """3+ yellow cards in 5 min, after minute 35, with 4+ total cards in match."""
     minute = fixture.get("fixture", {}).get("status", {}).get("elapsed") or 0
-    if minute < 20 or minute > 88:
+    if minute < 35 or minute > 85:
         return None
     older = [h for h in history if h.get("minute") and minute - h["minute"] >= 5]
     if not older:
@@ -168,15 +167,17 @@ def card_storm(fixture, current_stats, history):
     base_stats = base.get("stats") or {}
     current_yellows = _sum_stat(current_stats, "Yellow Cards")
     base_yellows = _sum_stat(base_stats, "Yellow Cards")
-    if current_yellows - base_yellows >= 2:
+    delta = current_yellows - base_yellows
+    # Require: 3+ in window AND total >= 4 yellows in match already
+    if delta >= 3 and current_yellows >= 4:
         return Signal(
             rule_name="card_storm", market="cards",
             suggested_bet=(
-                f"{current_yellows - base_yellows} yellows in 5 min - "
-                f"over 4.5 cards in play, more incoming."
+                f"{delta} yellows in 5 min, {current_yellows} total - "
+                f"over 5.5 total cards by FT, more likely incoming."
             ),
             confidence=3, tier="signal", risk="medium",
-            criteria={"minute": minute, "yellow_delta": current_yellows - base_yellows},
+            criteria={"minute": minute, "yellow_delta": delta, "total_yellows": current_yellows},
         )
     return None
 
@@ -371,21 +372,16 @@ def htft_swing(fixture, current_stats, history):
 
 
 RULES = [
-    # URGENT - match-changers
     goal_alert,
     red_card_pressure,
     rapid_goals,
     late_equalizer,
-    # MEDIUM event
     card_storm,
-    # SAFE
     dominance_btts,
     over_volume,
-    # MOMENTUM
     shots_burst,
     corner_spam,
     attack_surge,
-    # RISKY
     late_push,
     htft_swing,
 ]
