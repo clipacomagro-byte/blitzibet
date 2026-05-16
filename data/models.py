@@ -3,7 +3,19 @@ import json
 from data.db import get_pool
 
 
-async def upsert_user(telegram_id: int, username: str | None) -> None:
+def _parse_jsonb(value):
+    """Postgres jsonb sometimes comes back as a string. Parse defensively."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return value
+
+
+async def upsert_user(telegram_id, username):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -17,7 +29,7 @@ async def upsert_user(telegram_id: int, username: str | None) -> None:
         )
 
 
-async def toggle_pin(user_id: int, sport: str, market: str) -> bool:
+async def toggle_pin(user_id, sport, market):
     pool = await get_pool()
     async with pool.acquire() as conn:
         existing = await conn.fetchval(
@@ -34,7 +46,7 @@ async def toggle_pin(user_id: int, sport: str, market: str) -> bool:
         return True
 
 
-async def get_user_pins(user_id: int) -> list[dict]:
+async def get_user_pins(user_id):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -44,7 +56,7 @@ async def get_user_pins(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def get_users_for_market(sport: str, market: str) -> list[int]:
+async def get_users_for_market(sport, market):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -58,9 +70,8 @@ async def get_users_for_market(sport: str, market: str) -> list[int]:
     return [r["telegram_id"] for r in rows]
 
 
-async def save_snapshot(fixture_id: int, minute: int, home_score: int,
-                        away_score: int, stats: dict,
-                        fixture_label: str = "", league: str = "") -> None:
+async def save_snapshot(fixture_id, minute, home_score, away_score, stats,
+                        fixture_label="", league=""):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -75,7 +86,7 @@ async def save_snapshot(fixture_id: int, minute: int, home_score: int,
         )
 
 
-async def recent_snapshots(fixture_id: int, limit: int = 20) -> list[dict]:
+async def recent_snapshots(fixture_id, limit=20):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -86,10 +97,15 @@ async def recent_snapshots(fixture_id: int, limit: int = 20) -> list[dict]:
             """,
             fixture_id, limit,
         )
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["stats"] = _parse_jsonb(d.get("stats"))
+        out.append(d)
+    return out
 
 
-async def is_on_cooldown(fixture_id: int, rule_name: str, minutes: int) -> bool:
+async def is_on_cooldown(fixture_id, rule_name, minutes):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchval(
@@ -103,7 +119,7 @@ async def is_on_cooldown(fixture_id: int, rule_name: str, minutes: int) -> bool:
     return row is not None
 
 
-async def record_cooldown(fixture_id: int, rule_name: str) -> None:
+async def record_cooldown(fixture_id, rule_name):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -118,7 +134,7 @@ async def record_cooldown(fixture_id: int, rule_name: str) -> None:
 
 
 async def insert_signal(sport, market, fixture_id, fixture_label, league,
-                        minute, rule_name, criteria, suggested_bet, confidence) -> int:
+                        minute, rule_name, criteria, suggested_bet, confidence):
     pool = await get_pool()
     async with pool.acquire() as conn:
         sig_id = await conn.fetchval(
@@ -127,133 +143,3 @@ async def insert_signal(sport, market, fixture_id, fixture_label, league,
               (sport, market, fixture_id, fixture_label, league, minute,
                rule_name, criteria, suggested_bet, confidence)
             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-            returning id
-            """,
-            sport, market, fixture_id, fixture_label, league, minute,
-            rule_name, json.dumps(criteria), suggested_bet, confidence,
-        )
-    return sig_id
-
-
-async def record_notification(signal_id, user_id, delivered, error=None) -> None:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            insert into notifications (signal_id, user_id, delivered, error)
-            values ($1, $2, $3, $4)
-            on conflict (signal_id, user_id) do nothing
-            """,
-            signal_id, user_id, delivered, error,
-        )
-
-
-async def user_stats(user_id: int) -> dict:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            select count(*) as total,
-              count(*) filter (where s.status = 'won') as won,
-              count(*) filter (where s.status = 'lost') as lost,
-              count(*) filter (where s.status = 'pending') as pending
-            from notifications n
-            join signals s on s.id = n.signal_id
-            where n.user_id = $1 and n.delivered = true
-            """,
-            user_id,
-        )
-    return dict(row) if row else {"total": 0, "won": 0, "lost": 0, "pending": 0}
-
-
-async def pending_signals_for_resolution() -> list[dict]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            select id, sport, market, fixture_id, criteria, suggested_bet, fired_at
-            from signals
-            where status = 'pending' and fired_at < now() - interval '15 minutes'
-            order by fired_at asc limit 50
-            """
-        )
-    return [dict(r) for r in rows]
-
-
-async def resolve_signal(signal_id, status, note=None) -> None:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            update signals set status = $2, resolved_at = now(), outcome_note = $3
-            where id = $1
-            """,
-            signal_id, status, note,
-        )
-
-
-async def get_active_fixtures(within_minutes: int = 3, limit: int = 15) -> list[dict]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            select distinct on (fixture_id)
-                fixture_id, minute, home_score, away_score,
-                fixture_label, league, taken_at
-            from fixture_snapshots
-            where taken_at > now() - ($1 || ' minutes')::interval
-            order by fixture_id, taken_at desc limit $2
-            """,
-            str(within_minutes), limit,
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_recent_signals(limit: int = 10) -> list[dict]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            select id, sport, market, fixture_label, league, minute,
-                   suggested_bet, confidence, fired_at, status, rule_name
-            from signals
-            order by fired_at desc
-            limit $1
-            """,
-            limit,
-        )
-    return [dict(r) for r in rows]
-
-
-async def track_bot_message(user_id: int, message_id: int) -> None:
-    """Record that the bot sent message_id to user_id, so we can delete it later."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            insert into user_bot_messages (user_id, message_id)
-            values ($1, $2)
-            """,
-            user_id, message_id,
-        )
-
-
-async def pop_user_messages(user_id: int, limit: int = 50) -> list[int]:
-    """Return all tracked message_ids for user (newest first, capped), and
-    delete the tracking rows. Caller can then delete those messages from Telegram."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            delete from user_bot_messages
-            where id in (
-              select id from user_bot_messages
-              where user_id = $1
-              order by sent_at desc
-              limit $2
-            )
-            returning message_id
-            """,
-            user_id, limit,
-        )
-    return [r["message_id"] for r in rows]
