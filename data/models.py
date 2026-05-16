@@ -210,8 +210,6 @@ async def get_active_fixtures(within_minutes: int = 3, limit: int = 15) -> list[
 
 
 async def get_recent_signals(limit: int = 10) -> list[dict]:
-    """Most recent signals system-wide — used by the History menu.
-    Anyone can see this regardless of whether they were notified."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -225,3 +223,37 @@ async def get_recent_signals(limit: int = 10) -> list[dict]:
             limit,
         )
     return [dict(r) for r in rows]
+
+
+async def track_bot_message(user_id: int, message_id: int) -> None:
+    """Record that the bot sent message_id to user_id, so we can delete it later."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            insert into user_bot_messages (user_id, message_id)
+            values ($1, $2)
+            """,
+            user_id, message_id,
+        )
+
+
+async def pop_user_messages(user_id: int, limit: int = 50) -> list[int]:
+    """Return all tracked message_ids for user (newest first, capped), and
+    delete the tracking rows. Caller can then delete those messages from Telegram."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            delete from user_bot_messages
+            where id in (
+              select id from user_bot_messages
+              where user_id = $1
+              order by sent_at desc
+              limit $2
+            )
+            returning message_id
+            """,
+            user_id, limit,
+        )
+    return [r["message_id"] for r in rows]
