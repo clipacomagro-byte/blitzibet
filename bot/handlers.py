@@ -1,12 +1,18 @@
-"""Telegram handlers. /start, button callbacks, text rejection, chat cleanup."""
+"""Telegram handlers. /start, button callbacks, text rejection, chat cleanup,
+on-demand test signal."""
 import logging
 import asyncio
+import random
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot import menus
 from data import models
+from engine.demo import DEMO_MATCHES, DEMO_SCENARIOS
+from engine.enrichment import build_narrative
+from engine.rules import Signal
+from engine.notifier import _format_signal
 
 log = logging.getLogger(__name__)
 
@@ -21,14 +27,12 @@ WELCOME = (
 
 
 async def _wipe_chat_for(user_id: int, chat_id: int, bot, limit: int = 50) -> None:
-    """Best-effort delete of all bot messages we've sent to this user."""
     msg_ids = await models.pop_user_messages(user_id, limit=limit)
     for mid in msg_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
-            pass  # too old / already gone / Telegram refused
-        # tiny pause to be polite to Telegram's rate limit
+            pass
         await asyncio.sleep(0.02)
 
 
@@ -39,16 +43,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await models.upsert_user(user.id, user.username)
     chat_id = update.effective_chat.id
 
-    # Delete the /start command itself
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # Wipe everything the bot has sent this user
     await _wipe_chat_for(user.id, chat_id, context.bot)
 
-    # Send fresh welcome menu and track it
     sent = await context.bot.send_message(
         chat_id=chat_id,
         text=WELCOME,
@@ -59,19 +60,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Anything typed that isn't a command — redirect to buttons."""
     if update.message is None:
         return
     user = update.effective_user
     chat_id = update.effective_chat.id
 
-    # Delete the user's typed message
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # Don't wipe everything on text — just send a fresh menu inline
     sent = await context.bot.send_message(
         chat_id=chat_id,
         text="👋 *Buttons only.*\n\n"
@@ -93,9 +91,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ns = parts[0]
 
     if ns == "m":
-        await _route_menu(parts, query)
+        await _route_menu(parts, query, context)
     elif ns == "p":
-        await _route_pin(parts, query)
+        await _route_pin(parts, query, context)
     else:
         log.warning("Unknown callback ns: %s", query.data)
 
@@ -126,7 +124,97 @@ def _status_label(status: str) -> str:
     }.get(status, "⏳ Pending")
 
 
-async def _route_menu(parts: list[str], query) -> None:
+async def _send_signal_resilient(bot, chat_id: int, text: str) -> int | None:
+    """Try Markdown first; fall back to plain text if Telegram rejects.
+    Returns message_id on success, None on failure."""
+    try:
+        sent = await bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="Markdown",
+        )
+        return sent.message_id
+    except Exception as e:
+        log.warning("Markdown send failed (%s), retrying without parse_mode", e)
+    try:
+        sent = await bot.send_message(chat_id=chat_id, text=text)
+        return sent.message_id
+    except Exception:
+        log.exception("Plain send also failed")
+        return None
+
+
+async def _fire_test_with(bot, user_id: int, chat_id: int,
+                          scenario: dict, match: dict, label: str) -> str | None:
+    """Run a synthetic signal through the full pipeline and send to one user.
+    Returns a non-None note string if anything degraded (e.g. Claude missing)."""
+    fake_fixture = {
+        "fixture": {"id": 999000 + random.randint(0, 9999),
+                    "status": {"elapsed": scenario["minute"]}},
+        "teams": {
+            "home": {"id": match["home_id"], "name": match["home_name"]},
+            "away": {"id": match["away_id"], "name": match["away_name"]},
+        },
+        "league": {"name": match["league"]},
+        "goals": {"home": scenario["home_goals"], "away": scenario["away_goals"]},
+    }
+    fake_stats = {
+        match["home_id"]: scenario["home_stats"],
+        match["away_id"]: scenario["away_stats"],
+    }
+    fake_signal = Signal(
+        rule_name=scenario["rule_name"],
+        market=scenario["market"],
+        suggested_bet=scenario["suggested_bet"],
+        confidence=scenario["confidence"],
+        criteria=scenario["criteria"],
+        tier=scenario["tier"],
+    )
+
+    signal_id = await models.insert_signal(
+        sport="football", market=scenario["market"],
+        fixture_id=fake_fixture["fixture"]["id"],
+        fixture_label=label, league=match["league"],
+        minute=scenario["minute"],
+        rule_name=scenario["rule_name"],
+        criteria=scenario["criteria"],
+        suggested_bet=scenario["suggested_bet"],
+        confidence=scenario["confidence"],
+    )
+
+    narrative = None
+    try:
+        narrative = await build_narrative(fake_fixture, fake_stats, [], fake_signal)
+    except Exception:
+        log.exception("Test enrichment failed")
+
+    text = _format_signal(
+        fixture_label=label, league=match["league"],
+        minute=scenario["minute"],
+        home_goals=scenario["home_goals"], away_goals=scenario["away_goals"],
+        market=scenario["market"],
+        suggested_bet=scenario["suggested_bet"],
+        confidence=scenario["confidence"],
+        rule_name=scenario["rule_name"],
+        tier=scenario["tier"],
+        narrative=narrative,
+    )
+
+    note = None
+    if not narrative:
+        note = "AI narrative is empty — `ANTHROPIC_API_KEY` is missing on the bot service"
+
+    msg_id = await _send_signal_resilient(bot, chat_id, text)
+    if msg_id is None:
+        raise RuntimeError("Telegram refused both Markdown and plain text — signal text may be malformed")
+
+    try:
+        await models.track_bot_message(user_id, msg_id)
+    except Exception:
+        pass
+
+    return note
+
+
+async def _route_menu(parts: list[str], query, context) -> None:
     action = parts[1] if len(parts) > 1 else "home"
 
     if action == "home":
@@ -247,24 +335,12 @@ async def _route_menu(parts: list[str], query) -> None:
             parse_mode="Markdown",
         )
 
+    elif action == "test":
+        user_id = query.from_user.id
+        chat_id = query.message.chat_id
 
-async def _route_pin(parts: list[str], query) -> None:
-    if len(parts) < 3:
-        return
-    sport, market = parts[1], parts[2]
-    user_id = query.from_user.id
-
-    now_pinned = await models.toggle_pin(user_id, sport, market)
-
-    if sport == "football":
+        # Pick scenario + match BEFORE showing loading state so we can name it
         pins = await models.get_user_pins(user_id)
         pinned_markets = {p["market"] for p in pins if p["sport"] == "football"}
-        verb = "Pinned" if now_pinned else "Removed"
-        await query.edit_message_text(
-            f"⚽ *Football — pick your markets*\n\n"
-            f"✓ {verb} *{market}*\n"
-            f"📍 = pinned · tap again to remove\n"
-            f"_Pin all 6 to receive every signal_",
-            reply_markup=menus.football_menu(pinned_markets),
-            parse_mode="Markdown",
-        )
+        matching = [s for s in DEMO_SCENARIOS if s["market"] in pinned_markets] if pinned_markets else []
+        scenario = random.choice(matching) if matching else random.choice(DEM
