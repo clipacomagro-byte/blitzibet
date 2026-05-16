@@ -1,8 +1,4 @@
-"""Signal enrichment. When a rule fires:
-  1. Pull extra context (H2H history)
-  2. Build a structured context dict
-  3. Call Claude to write the narrative
-"""
+"""Signal enrichment — H2H context + Claude narrative."""
 import logging
 
 from data import api_football as api
@@ -79,25 +75,18 @@ async def build_narrative(fixture: dict, current_stats: dict,
 
 
 def _summarise_h2h(h2h: list[dict]) -> str:
+    """Expects normalized shape from api.head_to_head:
+    [{date, home_score, away_score, total_goals}]"""
     lines = []
     goals_total = 0
     games_counted = 0
     for m in h2h[:5]:
-        h_score, a_score = 0, 0
-        for s in m.get("scores") or []:
-            if s.get("description") != "CURRENT":
-                continue
-            score_obj = s.get("score") or {}
-            side = score_obj.get("participant")
-            goals = score_obj.get("goals") or 0
-            if side == "home":
-                h_score = goals
-            elif side == "away":
-                a_score = goals
-        total = h_score + a_score
+        h_score = m.get("home_score") or 0
+        a_score = m.get("away_score") or 0
+        total = m.get("total_goals") or (h_score + a_score)
         goals_total += total
         games_counted += 1
-        date = (m.get("starting_at") or "")[:10]
+        date = m.get("date") or ""
         lines.append(f"  {date}: {h_score}-{a_score} ({total} goals)")
     avg = (goals_total / games_counted) if games_counted else 0
     header = f"Last {games_counted} meetings, avg {avg:.1f} goals/match:"
